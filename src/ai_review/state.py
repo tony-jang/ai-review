@@ -10,7 +10,7 @@ TRANSITIONS: dict[SessionStatus, set[SessionStatus]] = {
     SessionStatus.COLLECTING: {SessionStatus.REVIEWING},
     SessionStatus.REVIEWING: {SessionStatus.DEDUP},
     SessionStatus.DEDUP: {SessionStatus.DELIBERATING},
-    SessionStatus.DELIBERATING: {SessionStatus.COMPLETE},
+    SessionStatus.DELIBERATING: {SessionStatus.DELIBERATING, SessionStatus.COMPLETE},
     SessionStatus.COMPLETE: set(),
 }
 

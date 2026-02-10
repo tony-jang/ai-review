@@ -21,7 +21,7 @@ def start(
 
     from ai_review.server import create_app
 
-    fastapi_app = create_app(repo_path=repo_path)
+    fastapi_app = create_app(repo_path=repo_path, port=port)
 
     typer.echo(f"Starting AI Review on http://localhost:{port}")
     typer.echo(f"  Repo: {repo_path}")

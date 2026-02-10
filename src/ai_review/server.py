@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -10,18 +11,27 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ai_review.models import AssistMessage, SessionStatus
+from ai_review.orchestrator import Orchestrator
 from ai_review.session_manager import SessionManager
 from ai_review.tools import mcp, set_manager
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(repo_path: str | None = None) -> FastAPI:
+def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     """Create the FastAPI application."""
     manager = SessionManager(repo_path=repo_path)
     set_manager(manager)
 
-    app = FastAPI(title="AI Review", version="0.1.0")
+    mcp_server_url = f"http://localhost:{port}/mcp"
+    orchestrator = Orchestrator(manager, mcp_server_url=mcp_server_url)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        await orchestrator.close()
+
+    app = FastAPI(title="AI Review", version="0.1.0", lifespan=lifespan)
 
     # --- REST API ---
 
@@ -30,6 +40,11 @@ def create_app(repo_path: str | None = None) -> FastAPI:
         body = await request.json() if await request.body() else {}
         base = body.get("base", "main")
         result = await manager.start_review(base)
+
+        # Kick off automated review if models are configured
+        session_id = result["session_id"]
+        await orchestrator.start(session_id)
+
         return JSONResponse(result)
 
     @app.get("/api/sessions/{session_id}/context")

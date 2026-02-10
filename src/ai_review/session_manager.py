@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from ai_review.git_diff import collect_diff, get_diff_summary, parse_diff
 from ai_review.knowledge import load_config, load_knowledge
 from ai_review.models import (
@@ -28,6 +31,11 @@ class SessionManager:
         self.sessions: dict[str, ReviewSession] = {}
         self.broker = SSEBroker()
         self._current_session_id: str | None = None
+
+        # Optional callbacks — set by Orchestrator to drive automation.
+        # When None the manager behaves as before (manual mode).
+        self.on_review_submitted: Callable[[str, str], Any] | None = None  # (session_id, model_id)
+        self.on_opinion_submitted: Callable[[str, str, str], Any] | None = None  # (session_id, issue_id, model_id)
 
     @property
     def current_session(self) -> ReviewSession | None:
@@ -109,11 +117,16 @@ class SessionManager:
             },
         )
 
-        return {
+        result = {
             "status": "accepted",
             "review_count": len(session.reviews),
             "issue_count": len(raw_issues),
         }
+
+        if self.on_review_submitted is not None:
+            self.on_review_submitted(session_id, model_id)
+
+        return result
 
     def get_all_reviews(self, session_id: str) -> list[dict]:
         """Get all submitted reviews."""
@@ -198,7 +211,12 @@ class SessionManager:
                     },
                 )
 
-                return {"status": "accepted", "thread_length": len(issue.thread)}
+                result = {"status": "accepted", "thread_length": len(issue.thread)}
+
+                if self.on_opinion_submitted is not None:
+                    self.on_opinion_submitted(session_id, issue_id, model_id)
+
+                return result
 
         raise KeyError(f"Issue not found: {issue_id}")
 

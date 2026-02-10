@@ -74,9 +74,16 @@ class TestInvalidTransitions:
 
     def test_no_self_transition(self):
         for status in SessionStatus:
+            if status == SessionStatus.DELIBERATING:
+                continue  # DELIBERATING allows self-transition for multi-turn loops
             session = ReviewSession(status=status)
             with pytest.raises(InvalidTransitionError):
                 transition(session, status)
+
+    def test_deliberating_self_transition(self):
+        session = ReviewSession(status=SessionStatus.DELIBERATING)
+        result = transition(session, SessionStatus.DELIBERATING)
+        assert result.status == SessionStatus.DELIBERATING
 
     def test_no_backward_transition(self):
         session = ReviewSession(status=SessionStatus.REVIEWING)
