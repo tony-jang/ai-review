@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Review</title>
+<style>
+:root {
+  --bg: #0D1117;
+  --card: #161B22;
+  --border: #30363D;
+  --text: #E6EDF3;
+  --text-muted: #8B949E;
+  --severity-critical: #EF4444;
+  --severity-high: #F97316;
+  --severity-medium: #EAB308;
+  --severity-low: #6B7280;
+  --severity-dismissed: #22C55E;
+  --model-opus: #8B5CF6;
+  --model-gpt: #22C55E;
+  --model-gemini: #3B82F6;
+  --model-deepseek: #F97316;
+  --accent: #58A6FF;
+  --diff-add-bg: rgba(63,185,80,0.15);
+  --diff-del-bg: rgba(248,81,73,0.15);
+  --diff-add-text: #3fb950;
+  --diff-del-text: #f85149;
+  --diff-hunk-bg: rgba(56,139,253,0.15);
+  --diff-hunk-text: #58a6ff;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+
+.header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--card); }
+.header h1 { font-size: 16px; font-weight: 600; }
+.header .branch { color: var(--accent); font-size: 13px; }
+.header .stats { margin-left: auto; font-size: 13px; color: var(--text-muted); display: flex; gap: 16px; align-items: center; }
+
+.progress-bar { padding: 8px 20px; border-bottom: 1px solid var(--border); background: var(--card); display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.progress-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.5s ease; width: 0%; }
+.progress-label { color: var(--text-muted); white-space: nowrap; }
+
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* Issue list */
+.issue-list { width: 300px; min-width: 300px; border-right: 1px solid var(--border); overflow-y: auto; }
+.issue-item { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; align-items: flex-start; gap: 8px; transition: background 0.15s; }
+.issue-item:hover { background: rgba(88,166,255,0.06); }
+.issue-item.active { background: rgba(88,166,255,0.1); border-left: 3px solid var(--accent); }
+.issue-icon { font-size: 12px; margin-top: 3px; }
+.issue-info { flex: 1; min-width: 0; }
+.issue-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.issue-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; display: flex; gap: 6px; align-items: center; }
+.severity-badge { font-size: 10px; padding: 1px 5px; border-radius: 8px; font-weight: 600; text-transform: uppercase; }
+
+/* Detail panel */
+.issue-detail { flex: 1; overflow-y: auto; }
+
+.detail-header-bar { padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--card); }
+.detail-title { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+.detail-file { font-size: 13px; color: var(--accent); font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace; }
+.detail-badges { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
+
+/* Diff view */
+.diff-container { border-bottom: 1px solid var(--border); }
+.diff-file-header { padding: 8px 16px; background: var(--card); border-bottom: 1px solid var(--border); font-size: 12px; font-family: 'SF Mono', Monaco, monospace; color: var(--text-muted); display: flex; align-items: center; gap: 8px; }
+.diff-file-header .filename { color: var(--text); font-weight: 500; }
+.diff-table { width: 100%; border-collapse: collapse; font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace; font-size: 12px; line-height: 20px; }
+.diff-table td { padding: 0 12px; vertical-align: top; white-space: pre; }
+.diff-line-num { width: 50px; min-width: 50px; text-align: right; color: var(--text-muted); user-select: none; opacity: 0.5; }
+.diff-line-content { width: 100%; }
+.diff-add { background: var(--diff-add-bg); }
+.diff-add .diff-line-content { color: var(--diff-add-text); }
+.diff-del { background: var(--diff-del-bg); }
+.diff-del .diff-line-content { color: var(--diff-del-text); }
+.diff-hunk { background: var(--diff-hunk-bg); }
+.diff-hunk td { color: var(--diff-hunk-text); font-style: italic; padding: 4px 12px; }
+.diff-context td { color: var(--text-muted); }
+/* Issue marker on diff line */
+.diff-issue-marker { position: relative; }
+.diff-issue-marker::after { content: ''; position: absolute; left: 0; right: 0; top: 0; bottom: 0; border: 1px solid var(--severity-critical); border-radius: 2px; pointer-events: none; opacity: 0.5; }
+.diff-loading { padding: 24px; text-align: center; color: var(--text-muted); font-size: 13px; }
+
+/* Thread panel */
+.thread-panel { padding: 16px 20px; }
+.thread-title { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 12px; letter-spacing: 0.5px; }
+.opinion { padding: 12px 14px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; }
+.opinion-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 12px; }
+.model-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.model-name { font-weight: 600; }
+.action-badge { font-size: 10px; padding: 2px 6px; border-radius: 8px; font-weight: 600; text-transform: uppercase; }
+.action-raise { background: rgba(239,68,68,0.15); color: var(--severity-critical); }
+.action-agree { background: rgba(34,197,94,0.15); color: var(--severity-dismissed); }
+.action-disagree { background: rgba(239,68,68,0.15); color: var(--severity-critical); }
+.action-clarify { background: rgba(234,179,8,0.15); color: var(--severity-medium); }
+.opinion-text { font-size: 13px; line-height: 1.5; color: var(--text); }
+.opinion-suggestion { font-size: 12px; margin-top: 6px; padding: 8px 10px; background: rgba(34,197,94,0.08); border-left: 3px solid var(--severity-dismissed); border-radius: 0 4px 4px 0; color: var(--diff-add-text); }
+
+.consensus-box { margin: 12px 0; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.consensus-reached { background: rgba(34,197,94,0.1); border-color: var(--severity-dismissed); color: var(--severity-dismissed); }
+.consensus-pending { background: rgba(234,179,8,0.1); border-color: var(--severity-medium); color: var(--severity-medium); }
+
+/* Comment form */
+.comment-form { padding: 16px 20px; border-top: 1px solid var(--border); }
+.comment-form textarea { width: 100%; min-height: 80px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 13px; font-family: inherit; resize: vertical; }
+.comment-form textarea:focus { outline: none; border-color: var(--accent); }
+.comment-actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+.comment-actions .spacer { flex: 1; }
+.btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+.btn:hover { background: var(--border); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-agree { border-color: #22C55E40; color: var(--severity-dismissed); }
+.btn-agree:hover { background: rgba(34,197,94,0.15); }
+.btn-disagree { border-color: #EF444440; color: var(--severity-critical); }
+.btn-disagree:hover { background: rgba(239,68,68,0.15); }
+.btn-comment { border-color: #EAB30840; color: var(--severity-medium); }
+.btn-comment:hover { background: rgba(234,179,8,0.15); }
+.btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn-primary:hover { background: #4C9AFF; }
+.btn-finish { background: #22C55E; color: #fff; border-color: #22C55E; }
+.btn-finish:hover { background: #16A34A; }
+
+/* Assist chat */
+.assist-section { border-top: 2px solid var(--accent); }
+.assist-toggle { padding: 12px 20px; display: flex; align-items: center; gap: 8px; cursor: pointer; background: rgba(88,166,255,0.06); transition: background 0.15s; }
+.assist-toggle:hover { background: rgba(88,166,255,0.1); }
+.assist-toggle .label { font-size: 13px; font-weight: 600; color: var(--accent); }
+.assist-toggle .hint { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+.assist-chat { display: none; }
+.assist-chat.open { display: block; }
+.assist-messages { padding: 16px 20px; max-height: 400px; overflow-y: auto; }
+.assist-msg { margin-bottom: 12px; }
+.assist-msg-user { display: flex; justify-content: flex-end; }
+.assist-msg-user .bubble { background: var(--accent); color: #fff; border-radius: 12px 12px 2px 12px; padding: 8px 14px; max-width: 80%; font-size: 13px; line-height: 1.5; }
+.assist-msg-ai { display: flex; justify-content: flex-start; }
+.assist-msg-ai .bubble { background: var(--card); border: 1px solid var(--border); border-radius: 12px 12px 12px 2px; padding: 10px 14px; max-width: 90%; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+.assist-msg-ai .bubble code { background: rgba(110,118,129,0.2); padding: 1px 5px; border-radius: 3px; font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }
+.assist-msg-ai .bubble pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 8px 0; overflow-x: auto; }
+.assist-msg-ai .bubble pre code { background: none; padding: 0; font-size: 12px; }
+.assist-input-bar { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: flex-end; }
+.assist-input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 13px; font-family: inherit; resize: none; min-height: 38px; max-height: 120px; }
+.assist-input:focus { outline: none; border-color: var(--accent); }
+.btn-assist-send { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.btn-assist-send:hover { background: #4C9AFF; }
+.btn-assist-send:disabled { opacity: 0.4; cursor: not-allowed; }
+.assist-thinking { padding: 8px 14px; color: var(--text-muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.assist-thinking .dots { display: inline-flex; gap: 3px; }
+.assist-thinking .dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); animation: dot-pulse 1.4s infinite; }
+.assist-thinking .dots span:nth-child(2) { animation-delay: 0.2s; }
+.assist-thinking .dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot-pulse { 0%,80%,100%{opacity:0.3} 40%{opacity:1} }
+.assist-cli { padding: 8px 20px 16px; }
+.assist-cli-box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-family: 'SF Mono', Monaco, monospace; font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 8px; cursor: pointer; transition: border-color 0.15s; }
+.assist-cli-box:hover { border-color: var(--accent); }
+.assist-cli-box .cmd { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assist-cli-box .copy-hint { color: var(--accent); font-size: 11px; white-space: nowrap; }
+
+/* Report overlay */
+.report-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.report-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; max-width: 700px; width: 90%; max-height: 80vh; overflow-y: auto; }
+.report-header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.report-header h2 { font-size: 18px; }
+.report-close { background: none; border: none; color: var(--text-muted); font-size: 20px; cursor: pointer; padding: 4px 8px; }
+.report-close:hover { color: var(--text); }
+.report-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 20px 24px; border-bottom: 1px solid var(--border); }
+.report-stat { text-align: center; }
+.report-stat .value { font-size: 28px; font-weight: 700; color: var(--accent); }
+.report-stat .label { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.report-issues { padding: 16px 24px; }
+.report-issue { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.report-issue:last-child { border-bottom: none; }
+
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 8px; }
+.empty-state .icon { font-size: 40px; opacity: 0.3; }
+.empty-state .message { font-size: 14px; }
+.empty-state .hint { font-size: 12px; }
+
+.summary-bar { padding: 8px 20px; border-top: 1px solid var(--border); background: var(--card); font-size: 12px; color: var(--text-muted); }
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>AI Review</h1>
+  <span class="branch" id="branch-info">--</span>
+  <div class="stats">
+    <span id="stat-files">파일 0개</span>
+    <span id="stat-reviews">리뷰 0개</span>
+    <span id="stat-issues">이슈 0개</span>
+    <button class="btn btn-primary" id="btn-process" style="display:none" onclick="processReviews()">리뷰 처리</button>
+    <button class="btn btn-finish" id="btn-finish" style="display:none" onclick="finishReview()">리뷰 완료</button>
+  </div>
+</div>
+
+<div class="progress-bar">
+  <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+  <span class="progress-label" id="progress-label">대기 중</span>
+</div>
+
+<div class="main">
+  <div class="issue-list" id="issue-list">
+    <div class="empty-state"><div class="icon">&#128269;</div><div class="message">이슈가 없습니다</div><div class="hint">리뷰 세션을 시작하세요</div></div>
+  </div>
+  <div class="issue-detail" id="issue-detail">
+    <div class="empty-state"><div class="icon">&#128221;</div><div class="message">이슈를 선택하세요</div><div class="hint">이슈를 클릭하면 코드와 토론을 볼 수 있습니다</div></div>
+  </div>
+</div>
+
+<div class="summary-bar" id="summary-bar">준비 완료</div>
+
+<script>
+const MODEL_COLORS = { opus:'#8B5CF6', gpt:'#22C55E', gemini:'#3B82F6', deepseek:'#F97316', human:'#58A6FF' };
+const SEVERITY_COLORS = { critical:'#EF4444', high:'#F97316', medium:'#EAB308', low:'#6B7280', dismissed:'#22C55E' };
+const SEVERITY_ICONS = { critical:'\uD83D\uDD34', high:'\uD83D\uDFE0', medium:'\uD83D\uDFE1', low:'\u26AA', dismissed:'\u2705' };
+const SEVERITY_LABELS = { critical:'심각', high:'높음', medium:'보통', low:'낮음', dismissed:'기각' };
+const ACTION_LABELS = { raise:'제기', agree:'동의', disagree:'반대', clarify:'의견' };
+const PHASE_PROGRESS = { idle:0, collecting:10, reviewing:30, dedup:50, deliberating:70, complete:100 };
+const PHASE_LABELS = { idle:'대기 중', collecting:'변경사항 수집 중...', reviewing:'리뷰 중...', dedup:'중복 제거 중...', deliberating:'토론 중...', complete:'완료' };
+
+let state = { sessionId:null, status:'idle', issues:[], selectedIssue:null, diffCache:{} };
+
+function getModelColor(id) {
+  const k = Object.keys(MODEL_COLORS).find(k => id.toLowerCase().includes(k));
+  return k ? MODEL_COLORS[k] : '#8B949E';
+}
+function esc(s) { if(!s) return ''; const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+function sevLabel(s) { return SEVERITY_LABELS[s]||s; }
+function actLabel(a) { return ACTION_LABELS[a]||a; }
+
+function renderIssueList() {
+  const el = document.getElementById('issue-list');
+  if (!state.issues.length) { el.innerHTML='<div class="empty-state"><div class="icon">&#128269;</div><div class="message">이슈가 없습니다</div><div class="hint">리뷰 세션을 시작하세요</div></div>'; return; }
+  el.innerHTML = state.issues.map((issue,i) => {
+    const sev = issue.final_severity || issue.severity;
+    const icon = SEVERITY_ICONS[sev]||'\u26AA';
+    const color = SEVERITY_COLORS[sev]||'#6B7280';
+    const active = state.selectedIssue===issue.id?' active':'';
+    const cLabel = issue.consensus===true?'\u2705':issue.consensus===false?'\u26A0':'\u23F3';
+    const raisedBy = issue.raised_by||'';
+    return `<div class="issue-item${active}" onclick="selectIssue('${issue.id}')">
+      <span class="issue-icon">${icon}</span>
+      <div class="issue-info">
+        <div class="issue-title">#${i+1} ${esc(issue.title)}</div>
+        <div class="issue-meta">
+          <span class="severity-badge" style="background:${color}20;color:${color}">${sevLabel(sev)}</span>
+          <span>${cLabel}</span>
+          <span style="color:${getModelColor(raisedBy)}">${esc(raisedBy)}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function parseDiffLines(content) {
+  if (!content) return [];
+  const lines = content.split('\n');
+  const result = [];
+  let oldLine = 0, newLine = 0;
+  for (const line of lines) {
+    if (line.startsWith('@@')) {
+      const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/);
+      if (m) { oldLine = parseInt(m[1]); newLine = parseInt(m[2]); }
+      result.push({ type:'hunk', text:line });
+    } else if (line.startsWith('+')) {
+      result.push({ type:'add', old:'', new:newLine, text:line.slice(1) });
+      newLine++;
+    } else if (line.startsWith('-')) {
+      result.push({ type:'del', old:oldLine, new:'', text:line.slice(1) });
+      oldLine++;
+    } else if (line.startsWith('diff --git') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
+      // skip header lines
+    } else {
+      result.push({ type:'ctx', old:oldLine, new:newLine, text:line.slice(1)||line });
+      oldLine++; newLine++;
+    }
+  }
+  return result;
+}
+
+function renderDiff(diffContent, issue) {
+  if (!diffContent) return '<div class="diff-loading">변경 내역 없음</div>';
+  const lines = parseDiffLines(diffContent);
+  if (!lines.length) return '<div class="diff-loading">변경 없음</div>';
+
+  let html = '<table class="diff-table">';
+  for (const l of lines) {
+    if (l.type==='hunk') {
+      html += `<tr class="diff-hunk"><td colspan="3">${esc(l.text)}</td></tr>`;
+    } else {
+      const cls = l.type==='add'?'diff-add':l.type==='del'?'diff-del':'diff-context';
+      const marker = (issue.line && l.new === issue.line) ? ' diff-issue-marker':'';
+      const prefix = l.type==='add'?'+':l.type==='del'?'-':' ';
+      html += `<tr class="${cls}${marker}"><td class="diff-line-num">${l.old}</td><td class="diff-line-num">${l.new}</td><td class="diff-line-content">${prefix}${esc(l.text)}</td></tr>`;
+    }
+  }
+  html += '</table>';
+  return html;
+}
+
+async function renderIssueDetail() {
+  const el = document.getElementById('issue-detail');
+  if (!state.selectedIssue) { el.innerHTML='<div class="empty-state"><div class="icon">&#128221;</div><div class="message">이슈를 선택하세요</div><div class="hint">이슈를 클릭하면 코드와 토론을 볼 수 있습니다</div></div>'; return; }
+  const issue = state.issues.find(i=>i.id===state.selectedIssue);
+  if (!issue) return;
+
+  const sev = issue.final_severity||issue.severity;
+  const sevColor = SEVERITY_COLORS[sev]||'#6B7280';
+  const fileLine = issue.line ? `${issue.file}:${issue.line}` : issue.file;
+
+  // Header
+  let html = `<div class="detail-header-bar">
+    <div class="detail-title">${esc(issue.title)}</div>
+    <div class="detail-file">${esc(fileLine)}</div>
+    <div class="detail-badges">
+      <span class="severity-badge" style="background:${sevColor}20;color:${sevColor}">${sevLabel(sev)}</span>
+      <span style="font-size:12px;color:var(--text-muted)">제기: <span style="color:${getModelColor(issue.raised_by||'')}">${esc(issue.raised_by)}</span></span>
+    </div>
+  </div>`;
+
+  // Description
+  if (issue.description) {
+    html += `<div style="padding:12px 20px;border-bottom:1px solid var(--border);font-size:13px;line-height:1.5;color:var(--text-muted)">${esc(issue.description)}</div>`;
+  }
+  if (issue.suggestion) {
+    html += `<div style="padding:10px 20px;border-bottom:1px solid var(--border)"><div class="opinion-suggestion">${esc(issue.suggestion)}</div></div>`;
+  }
+
+  // Diff
+  html += '<div class="diff-container">';
+  html += `<div class="diff-file-header"><span class="filename">${esc(issue.file)}</span></div>`;
+
+  const diffContent = await fetchDiff(issue.file);
+  html += renderDiff(diffContent, issue);
+  html += '</div>';
+
+  // Thread
+  if (issue.thread && issue.thread.length) {
+    html += '<div class="thread-panel"><div class="thread-title">토론 (' + issue.thread.length + ')</div>';
+    for (const op of issue.thread) {
+      const mColor = getModelColor(op.model_id);
+      const actionClass = 'action-'+op.action;
+      html += `<div class="opinion">
+        <div class="opinion-header">
+          <span class="model-dot" style="background:${mColor}"></span>
+          <span class="model-name" style="color:${mColor}">${esc(op.model_id)}</span>
+          <span class="action-badge ${actionClass}">${actLabel(op.action)}</span>
+          ${op.suggested_severity?`<span class="severity-badge" style="background:${SEVERITY_COLORS[op.suggested_severity]||'#6B7280'}20;color:${SEVERITY_COLORS[op.suggested_severity]||'#6B7280'}">${sevLabel(op.suggested_severity)}</span>`:''}
+        </div>
+        <div class="opinion-text">${esc(op.reasoning)}</div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  // Consensus
+  if (issue.consensus===true) {
+    html += `<div style="padding:0 20px 16px"><div class="consensus-box consensus-reached">\u2705 합의 완료 \u2192 ${sevLabel(sev)}</div></div>`;
+  } else if (issue.thread && issue.thread.length > 1) {
+    html += `<div style="padding:0 20px 16px"><div class="consensus-box consensus-pending">\u23F3 합의 대기 중</div></div>`;
+  }
+
+  // Comment form (only when session is not complete)
+  if (state.status !== 'complete') {
+    html += `<div class="comment-form">
+      <textarea id="comment-text" placeholder="이 이슈에 대한 의견을 작성하세요..."></textarea>
+      <div class="comment-actions">
+        <button class="btn btn-agree" onclick="submitOpinion('${issue.id}','agree')">동의</button>
+        <button class="btn btn-disagree" onclick="submitOpinion('${issue.id}','disagree')">반대</button>
+        <button class="btn btn-comment" onclick="submitOpinion('${issue.id}','clarify')">의견</button>
+        <div class="spacer"></div>
+        <select id="comment-severity" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px;">
+          <option value="">-- 심각도 --</option>
+          <option value="critical">심각</option>
+          <option value="high">높음</option>
+          <option value="medium">보통</option>
+          <option value="low">낮음</option>
+          <option value="dismissed">기각</option>
+        </select>
+      </div>
+    </div>`;
+  }
+
+  // Assist (issue resolution helper)
+  const hasHistory = issue.assist_messages && issue.assist_messages.length > 0;
+  const openClass = hasHistory ? ' open' : '';
+  html += `<div class="assist-section">
+    <div class="assist-toggle" onclick="toggleAssist('${issue.id}')">
+      <span style="font-size:16px">&#129302;</span>
+      <span class="label">해결 도우미</span>
+      <span class="hint">${hasHistory ? issue.assist_messages.length + '개 메시지' : 'AI에게 이슈 해결을 요청하세요'}</span>
+    </div>
+    <div class="assist-chat${openClass}" id="assist-chat-${issue.id}">
+      <div class="assist-messages" id="assist-messages-${issue.id}">
+        ${hasHistory ? renderAssistMessages(issue.assist_messages) : '<div style="padding:8px;color:var(--text-muted);font-size:13px;text-align:center">아래에서 질문하거나 "이 이슈를 설명해줘"를 눌러보세요</div>'}
+      </div>
+      <div class="assist-cli">
+        <div class="assist-cli-box" onclick="copyCliCommand('${issue.id}')" title="클릭하면 복사됩니다">
+          <span style="color:var(--accent)">$</span>
+          <span class="cmd" id="assist-cli-${issue.id}">claude -p "${esc(issue.file)} 파일의 이슈를 해결해주세요: ${esc(issue.title)}"</span>
+          <span class="copy-hint">복사</span>
+        </div>
+      </div>
+      <div class="assist-input-bar">
+        <button class="btn btn-primary" style="font-size:12px;padding:8px 12px" onclick="sendAssist('${issue.id}','이 이슈에 대해 설명해주고, 어떻게 해결하면 좋을지 제안해줘')">설명 요청</button>
+        <textarea class="assist-input" id="assist-input-${issue.id}" placeholder="질문을 입력하세요..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAssistFromInput('${issue.id}')}"></textarea>
+        <button class="btn-assist-send" id="assist-send-${issue.id}" onclick="sendAssistFromInput('${issue.id}')">전송</button>
+      </div>
+    </div>
+  </div>`;
+
+  el.innerHTML = html;
+}
+
+async function fetchDiff(filePath) {
+  if (state.diffCache[filePath]) return state.diffCache[filePath];
+  if (!state.sessionId) return '';
+  try {
+    const r = await fetch(`/api/sessions/${state.sessionId}/diff/${filePath}`);
+    if (!r.ok) return '';
+    const d = await r.json();
+    state.diffCache[filePath] = d.content;
+    return d.content;
+  } catch(e) { return ''; }
+}
+
+function updateProgress() {
+  document.getElementById('progress-fill').style.width = (PHASE_PROGRESS[state.status]||0)+'%';
+  document.getElementById('progress-label').textContent = PHASE_LABELS[state.status]||state.status;
+}
+
+function updateSummary() {
+  const el = document.getElementById('summary-bar');
+  const t = state.issues.length;
+  const c = state.issues.filter(i=>i.consensus===true).length;
+  const d = state.issues.filter(i=>(i.final_severity||i.severity)==='dismissed').length;
+  if (!t) { el.textContent='준비 완료'; return; }
+  el.textContent = `이슈 ${t}개 \u00B7 합의 ${c}개 \u00B7 기각 ${d}개`;
+}
+
+function selectIssue(id) { state.selectedIssue=id; renderIssueList(); renderIssueDetail(); }
+
+// --- Assist (issue resolution helper) ---
+
+function renderAssistMessages(messages) {
+  return messages.map(m => {
+    if (m.role === 'user') {
+      return `<div class="assist-msg assist-msg-user"><div class="bubble">${esc(m.content)}</div></div>`;
+    }
+    // Render markdown-like formatting for assistant
+    let text = esc(m.content);
+    // Code blocks
+    text = text.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+    text = text.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+    // Inline code
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Bold
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    return `<div class="assist-msg assist-msg-ai"><div class="bubble">${text}</div></div>`;
+  }).join('');
+}
+
+function toggleAssist(issueId) {
+  const chat = document.getElementById('assist-chat-' + issueId);
+  if (chat) chat.classList.toggle('open');
+}
+
+async function sendAssist(issueId, message) {
+  if (!message?.trim()) return;
+  const messagesEl = document.getElementById('assist-messages-' + issueId);
+  const sendBtn = document.getElementById('assist-send-' + issueId);
+  const inputEl = document.getElementById('assist-input-' + issueId);
+
+  // Show user message immediately
+  messagesEl.innerHTML += `<div class="assist-msg assist-msg-user"><div class="bubble">${esc(message)}</div></div>`;
+  // Show thinking
+  messagesEl.innerHTML += '<div class="assist-thinking" id="assist-thinking"><span>생각하는 중</span><span class="dots"><span></span><span></span><span></span></span></div>';
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  if (sendBtn) sendBtn.disabled = true;
+  if (inputEl) inputEl.value = '';
+
+  try {
+    const r = await fetch(`/api/issues/${issueId}/assist`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.detail || '오류가 발생했습니다'); return; }
+
+    // Re-render all messages from server response
+    messagesEl.innerHTML = renderAssistMessages(data.messages);
+
+    // Update CLI command if available
+    if (data.cli_command) {
+      const cliEl = document.getElementById('assist-cli-' + issueId);
+      if (cliEl) cliEl.textContent = data.cli_command;
+    }
+  } catch (e) {
+    // Remove thinking indicator
+    const thinking = document.getElementById('assist-thinking');
+    if (thinking) thinking.remove();
+    messagesEl.innerHTML += `<div class="assist-msg assist-msg-ai"><div class="bubble" style="color:var(--severity-critical)">요청 실패: ${esc(e.message)}</div></div>`;
+  } finally {
+    if (sendBtn) sendBtn.disabled = false;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+}
+
+function sendAssistFromInput(issueId) {
+  const input = document.getElementById('assist-input-' + issueId);
+  if (!input?.value?.trim()) return;
+  sendAssist(issueId, input.value.trim());
+}
+
+function copyCliCommand(issueId) {
+  const el = document.getElementById('assist-cli-' + issueId);
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent).then(() => {
+    const hint = el.parentElement.querySelector('.copy-hint');
+    if (hint) { hint.textContent = '복사됨!'; setTimeout(() => { hint.textContent = '복사'; }, 1500); }
+  });
+}
+
+async function submitOpinion(issueId, action) {
+  const text = document.getElementById('comment-text')?.value?.trim();
+  if (!text) { alert('의견을 작성해주세요.'); return; }
+  const severity = document.getElementById('comment-severity')?.value || null;
+  try {
+    const r = await fetch(`/api/issues/${issueId}/opinions`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ model_id:'human', action, reasoning:text, suggested_severity:severity||undefined })
+    });
+    if (!r.ok) { const e = await r.json(); alert(e.detail||'오류가 발생했습니다'); return; }
+    await pollStatus();
+  } catch(e) { alert('제출에 실패했습니다'); }
+}
+
+async function processReviews() {
+  if (!state.sessionId) return;
+  const btn = document.getElementById('btn-process');
+  btn.disabled = true; btn.textContent = '처리 중...';
+  try {
+    const r = await fetch(`/api/sessions/${state.sessionId}/process`, {method:'POST'});
+    if (!r.ok) { const e = await r.json(); alert(e.detail||'오류가 발생했습니다'); return; }
+    await pollStatus();
+  } catch(e) { alert('처리에 실패했습니다'); }
+  btn.disabled = false; btn.textContent = '리뷰 처리';
+}
+
+async function finishReview() {
+  if (!state.sessionId) return;
+  if (!confirm('리뷰 세션을 완료하시겠습니까? 최종 리포트가 생성됩니다.')) return;
+  const btn = document.getElementById('btn-finish');
+  btn.disabled = true; btn.textContent = '완료 중...';
+  try {
+    const r = await fetch(`/api/sessions/${state.sessionId}/finish`, {method:'POST'});
+    if (!r.ok) { const e = await r.json(); alert(e.detail||'오류가 발생했습니다'); return; }
+    const report = await r.json();
+    showReport(report);
+    await pollStatus();
+  } catch(e) { alert('완료에 실패했습니다'); }
+  btn.disabled = false; btn.textContent = '리뷰 완료';
+}
+
+function showReport(report) {
+  const overlay = document.createElement('div');
+  overlay.className = 'report-overlay';
+  const s = report.stats || {};
+  let issuesHtml = '';
+  for (const i of (report.issues||[])) {
+    const sev = i.final_severity || 'low';
+    const sevColor = SEVERITY_COLORS[sev]||'#6B7280';
+    const icon = SEVERITY_ICONS[sev]||'\u26AA';
+    const cIcon = i.consensus ? '\u2705' : '\u26A0';
+    issuesHtml += `<div class="report-issue">
+      <span>${icon}</span>
+      <span class="severity-badge" style="background:${sevColor}20;color:${sevColor}">${sevLabel(sev)}</span>
+      <span style="flex:1">${esc(i.title)}</span>
+      <span style="color:var(--text-muted);font-size:11px">${esc(i.file||'')}</span>
+      <span>${cIcon}</span>
+    </div>`;
+  }
+  overlay.innerHTML = `<div class="report-card">
+    <div class="report-header"><h2>최종 리포트</h2><button class="report-close" onclick="this.closest('.report-overlay').remove()">\u2715</button></div>
+    <div class="report-stats">
+      <div class="report-stat"><div class="value">${s.total_issues_found||0}</div><div class="label">원본 이슈</div></div>
+      <div class="report-stat"><div class="value">${s.after_dedup||0}</div><div class="label">중복 제거 후</div></div>
+      <div class="report-stat"><div class="value">${s.consensus_reached||0}</div><div class="label">합의 완료</div></div>
+      <div class="report-stat"><div class="value">${s.dismissed||0}</div><div class="label">기각</div></div>
+    </div>
+    <div class="report-issues">${issuesHtml || '<div style="padding:12px;color:var(--text-muted)">이슈 없음</div>'}</div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+}
+
+async function pollStatus() {
+  if (!state.sessionId) return;
+  try {
+    const r = await fetch(`/api/sessions/${state.sessionId}/status`);
+    const d = await r.json();
+    state.status = d.status;
+    document.getElementById('stat-files').textContent = '파일 '+d.files_changed+'개';
+    document.getElementById('stat-reviews').textContent = '리뷰 '+d.review_count+'개';
+    document.getElementById('stat-issues').textContent = '이슈 '+d.issue_count+'개';
+    document.getElementById('branch-info').textContent = d.base ? `\u2192 ${d.base}` : '--';
+    updateProgress();
+
+    // Show/hide action buttons based on status
+    const btnProcess = document.getElementById('btn-process');
+    const btnFinish = document.getElementById('btn-finish');
+    btnProcess.style.display = (d.status === 'reviewing' && d.review_count > 0) ? '' : 'none';
+    btnFinish.style.display = (d.status === 'deliberating' || d.status === 'reviewing') ? '' : 'none';
+
+    const ir = await fetch(`/api/sessions/${state.sessionId}/issues`);
+    if (ir.ok) { state.issues = await ir.json(); }
+    renderIssueList();
+    if (state.selectedIssue) renderIssueDetail();
+    updateSummary();
+  } catch(e) {}
+}
+
+function connectSSE(sid) {
+  const src = new EventSource(`/api/sessions/${sid}/stream`);
+  src.addEventListener('phase_change', ()=>pollStatus());
+  src.addEventListener('review_submitted', ()=>pollStatus());
+  src.addEventListener('opinion_submitted', ()=>pollStatus());
+  src.onerror = ()=>{ src.close(); setTimeout(()=>{ if(state.sessionId) connectSSE(state.sessionId); }, 3000); };
+}
+
+async function init() {
+  try {
+    const r = await fetch('/api/sessions/current/status');
+    if (r.ok) { const d = await r.json(); state.sessionId=d.session_id; state.status=d.status; }
+  } catch(e) {}
+  if (state.sessionId) { connectSSE(state.sessionId); await pollStatus(); }
+  setInterval(pollStatus, 3000);
+}
+init();
+</script>
+</body>
+</html>

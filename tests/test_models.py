@@ -1,0 +1,171 @@
+"""Tests for data models."""
+
+from datetime import datetime, timezone
+
+from ai_review.models import (
+    DiffFile,
+    Issue,
+    Knowledge,
+    Opinion,
+    OpinionAction,
+    RawIssue,
+    Review,
+    ReviewSession,
+    Severity,
+    SessionConfig,
+    SessionStatus,
+)
+
+
+class TestSeverity:
+    def test_values(self):
+        assert Severity.CRITICAL == "critical"
+        assert Severity.HIGH == "high"
+        assert Severity.MEDIUM == "medium"
+        assert Severity.LOW == "low"
+        assert Severity.DISMISSED == "dismissed"
+
+    def test_from_string(self):
+        assert Severity("critical") == Severity.CRITICAL
+
+
+class TestSessionStatus:
+    def test_all_states_exist(self):
+        expected = {"idle", "collecting", "reviewing", "dedup", "deliberating", "complete"}
+        actual = {s.value for s in SessionStatus}
+        assert actual == expected
+
+
+class TestDiffFile:
+    def test_creation(self):
+        df = DiffFile(path="foo.py", additions=5, deletions=2, content="diff content")
+        assert df.path == "foo.py"
+        assert df.additions == 5
+        assert df.deletions == 2
+
+    def test_defaults(self):
+        df = DiffFile(path="bar.py")
+        assert df.additions == 0
+        assert df.deletions == 0
+        assert df.content == ""
+
+
+class TestKnowledge:
+    def test_defaults(self):
+        k = Knowledge()
+        assert k.conventions == ""
+        assert k.decisions == ""
+        assert k.extra == {}
+
+    def test_with_extra(self):
+        k = Knowledge(extra={"architecture": "microservices"})
+        assert k.extra["architecture"] == "microservices"
+
+
+class TestRawIssue:
+    def test_required_fields(self):
+        issue = RawIssue(
+            title="Bug",
+            severity=Severity.HIGH,
+            file="main.py",
+            description="Something broken",
+        )
+        assert issue.title == "Bug"
+        assert issue.line is None
+        assert issue.suggestion == ""
+
+    def test_all_fields(self, sample_raw_issues):
+        issue = sample_raw_issues[0]
+        assert issue.line == 5
+        assert issue.suggestion == "Add try/except block."
+
+
+class TestReview:
+    def test_creation(self, sample_raw_issues):
+        review = Review(model_id="opus", issues=sample_raw_issues, summary="Looks OK")
+        assert review.model_id == "opus"
+        assert len(review.issues) == 2
+        assert isinstance(review.submitted_at, datetime)
+
+    def test_empty_issues(self):
+        review = Review(model_id="gpt", issues=[])
+        assert review.issues == []
+        assert review.summary == ""
+
+
+class TestOpinion:
+    def test_creation(self):
+        op = Opinion(
+            model_id="opus",
+            action=OpinionAction.AGREE,
+            reasoning="Valid concern",
+            suggested_severity=Severity.MEDIUM,
+        )
+        assert op.action == OpinionAction.AGREE
+        assert op.suggested_severity == Severity.MEDIUM
+
+    def test_without_severity(self):
+        op = Opinion(
+            model_id="gpt",
+            action=OpinionAction.CLARIFY,
+            reasoning="Need more context",
+        )
+        assert op.suggested_severity is None
+
+
+class TestIssue:
+    def test_creation(self):
+        issue = Issue(
+            title="Security flaw",
+            severity=Severity.CRITICAL,
+            file="auth.py",
+            raised_by="opus",
+        )
+        assert len(issue.id) == 12
+        assert issue.thread == []
+        assert issue.consensus is None
+        assert issue.turn == 0
+
+    def test_with_thread(self):
+        op = Opinion(
+            model_id="gpt",
+            action=OpinionAction.AGREE,
+            reasoning="Confirmed",
+        )
+        issue = Issue(
+            title="Bug",
+            severity=Severity.HIGH,
+            file="main.py",
+            thread=[op],
+        )
+        assert len(issue.thread) == 1
+
+
+class TestReviewSession:
+    def test_defaults(self):
+        session = ReviewSession()
+        assert session.status == SessionStatus.IDLE
+        assert session.base == "main"
+        assert session.diff == []
+        assert session.reviews == []
+        assert session.issues == []
+        assert session.client_sessions == {}
+        assert len(session.id) == 12
+
+    def test_with_data(self, sample_session):
+        assert len(sample_session.diff) == 2
+        assert sample_session.knowledge.conventions == "Use snake_case for functions."
+        assert sample_session.config.max_turns == 3
+
+    def test_serialization_roundtrip(self, sample_session):
+        data = sample_session.model_dump()
+        restored = ReviewSession.model_validate(data)
+        assert restored.id == sample_session.id
+        assert restored.base == sample_session.base
+        assert len(restored.diff) == len(sample_session.diff)
+
+    def test_json_roundtrip(self, sample_session):
+        json_str = sample_session.model_dump_json()
+        restored = ReviewSession.model_validate_json(json_str)
+        assert restored.id == sample_session.id
+        assert restored.status == sample_session.status
