@@ -18,6 +18,7 @@ class TestBuildReviewPrompt:
 
     def test_contains_api_endpoints(self):
         prompt = build_review_prompt("sess1", "opus", "", "http://localhost:3000")
+        assert "/api/sessions/sess1/index" in prompt
         assert "/api/sessions/sess1/context" in prompt
         assert "/api/sessions/sess1/reviews" in prompt
 

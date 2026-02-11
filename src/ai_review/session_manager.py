@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -97,6 +98,64 @@ class SessionManager:
             "knowledge": session.knowledge.model_dump(mode="json"),
             "files": [f.path for f in session.diff],
         }
+
+    def get_context_index(self, session_id: str) -> dict:
+        """Return a lightweight index for targeted context exploration."""
+        session = self.get_session(session_id)
+
+        files = []
+        for f in session.diff:
+            files.append({
+                "path": f.path,
+                "status": self._infer_file_status(f.content),
+                "additions": f.additions,
+                "deletions": f.deletions,
+                "hunks": self._extract_hunks(f.content),
+            })
+
+        return {
+            "session_id": session.id,
+            "base": session.base,
+            "head": session.head,
+            "files": files,
+            "suggested_commands": [
+                f"git diff {session.base}...HEAD -- <path>",
+                "sed -n '<start>,<end>p' <path>",
+                "rg '<symbol-or-keyword>' <path>",
+            ],
+        }
+
+    @staticmethod
+    def _infer_file_status(diff_content: str) -> str:
+        """Infer file status from unified diff headers."""
+        if not diff_content:
+            return "unknown"
+        if "new file mode" in diff_content:
+            return "added"
+        if "deleted file mode" in diff_content:
+            return "deleted"
+        if "rename from " in diff_content and "rename to " in diff_content:
+            return "renamed"
+        return "modified"
+
+    @staticmethod
+    def _extract_hunks(diff_content: str) -> list[dict[str, int]]:
+        """Extract unified diff hunk ranges for quick navigation."""
+        if not diff_content:
+            return []
+        hunks = []
+        for old_start, old_lines, new_start, new_lines in re.findall(
+            r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
+            diff_content,
+            flags=re.MULTILINE,
+        ):
+            hunks.append({
+                "old_start": int(old_start),
+                "old_lines": int(old_lines or 1),
+                "new_start": int(new_start),
+                "new_lines": int(new_lines or 1),
+            })
+        return hunks
 
     def submit_review(
         self, session_id: str, model_id: str, issues: list[dict], summary: str = ""

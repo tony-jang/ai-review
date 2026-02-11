@@ -57,6 +57,13 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
+    @app.get("/api/sessions/{session_id}/index")
+    async def api_get_context_index(session_id: str):
+        try:
+            return JSONResponse(manager.get_context_index(session_id))
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
     @app.post("/api/sessions/{session_id}/reviews")
     async def api_submit_review(session_id: str, request: Request):
         body = await request.json()

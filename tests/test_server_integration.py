@@ -38,6 +38,17 @@ class TestServerOrchestrator:
         assert resp.json()["status"] == "reviewing"
 
     @pytest.mark.asyncio
+    async def test_context_index_endpoint(self, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        session_id = resp.json()["session_id"]
+
+        resp = await client.get(f"/api/sessions/{session_id}/index")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id"] == session_id
+        assert "files" in data
+
+    @pytest.mark.asyncio
     async def test_full_manual_flow(self, client):
         # Start
         resp = await client.post("/api/sessions", json={"base": "main"})

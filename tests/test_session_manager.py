@@ -2,7 +2,7 @@
 
 import pytest
 
-from ai_review.models import SessionStatus, Severity
+from ai_review.models import DiffFile, SessionStatus, Severity
 from ai_review.session_manager import SessionManager
 
 
@@ -84,6 +84,34 @@ class TestGetReviewContext:
         assert "diff" in ctx
         assert "knowledge" in ctx
         assert "files" in ctx
+
+    @pytest.mark.asyncio
+    async def test_returns_context_index(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        session = manager.get_session(sid)
+        session.diff = [
+            DiffFile(
+                path="src/main.py",
+                additions=3,
+                deletions=1,
+                content=(
+                    "diff --git a/src/main.py b/src/main.py\n"
+                    "index 1..2 100644\n"
+                    "--- a/src/main.py\n"
+                    "+++ b/src/main.py\n"
+                    "@@ -10,2 +10,4 @@\n"
+                    "+print('x')\n"
+                ),
+            ),
+        ]
+
+        idx = manager.get_context_index(sid)
+        assert idx["session_id"] == sid
+        assert idx["files"][0]["path"] == "src/main.py"
+        assert idx["files"][0]["status"] == "modified"
+        assert idx["files"][0]["hunks"][0]["new_start"] == 10
+        assert "suggested_commands" in idx
 
 
 class TestCreateIssues:
