@@ -1,4 +1,4 @@
-"""Claude Code trigger engine — subprocess-based."""
+"""Codex CLI trigger engine — subprocess-based."""
 
 from __future__ import annotations
 
@@ -8,28 +8,25 @@ import uuid
 from ai_review.trigger.base import TriggerEngine, TriggerResult
 
 
-class ClaudeCodeTrigger(TriggerEngine):
-    """Trigger Claude Code via subprocess (claude -p)."""
+class CodexTrigger(TriggerEngine):
+    """Trigger OpenAI Codex CLI via subprocess (codex exec --full-auto)."""
 
     def __init__(self) -> None:
-        self._sessions: dict[str, str] = {}  # model_id -> cc session_id
+        pass
 
     async def create_session(self, model_id: str) -> str:
-        """Create a CC session ID (each call is independent, no --resume)."""
-        session_id = uuid.uuid4().hex[:12]
-        self._sessions[model_id] = session_id
-        return session_id
+        """Create a session ID (each codex exec call is independent)."""
+        return uuid.uuid4().hex[:12]
 
     async def send_prompt(
         self, client_session_id: str, model_id: str, prompt: str
     ) -> TriggerResult:
-        """Run claude -p <prompt> with tool use enabled."""
+        """Run codex exec --full-auto <prompt>."""
         args = [
-            "claude",
-            "--print",
-            "--output-format", "text",
-            "--allowedTools", "Bash(curl:*) Read",
-            "-p", prompt,
+            "codex", "exec",
+            "--full-auto",
+            "-c", "sandbox_workspace_write.network_access=true",
+            prompt,
         ]
 
         try:
@@ -52,7 +49,7 @@ class ClaudeCodeTrigger(TriggerEngine):
         except FileNotFoundError:
             return TriggerResult(
                 success=False,
-                error="claude CLI not found. Install Claude Code first.",
+                error="codex CLI not found. Install Codex CLI first.",
                 client_session_id=client_session_id,
             )
         except Exception as e:
@@ -63,5 +60,4 @@ class ClaudeCodeTrigger(TriggerEngine):
             )
 
     async def close(self) -> None:
-        """Clean up sessions."""
-        self._sessions.clear()
+        pass

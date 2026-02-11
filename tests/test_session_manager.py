@@ -226,6 +226,47 @@ class TestFinalReport:
         assert len(report["issues"]) == 2
 
 
+class TestAddManualIssue:
+    @pytest.mark.asyncio
+    async def test_adds_issue(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        result = manager.add_manual_issue(
+            sid, "Manual Bug", "high", "main.py", 42,
+            "Found manually", "Fix this",
+        )
+        assert result["title"] == "Manual Bug"
+        assert result["raised_by"] == "human"
+        assert result["severity"] == "high"
+
+        session = manager.get_session(sid)
+        assert len(session.issues) == 1
+        assert session.issues[0].raised_by == "human"
+
+    @pytest.mark.asyncio
+    async def test_cannot_add_in_idle_state(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        session = manager.get_session(sid)
+        session.status = SessionStatus.IDLE
+
+        with pytest.raises(ValueError, match="Cannot add issue"):
+            manager.add_manual_issue(sid, "Bug", "high", "a.py", None, "desc")
+
+    @pytest.mark.asyncio
+    async def test_issue_has_raise_opinion(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        result = manager.add_manual_issue(
+            sid, "Bug", "medium", "x.py", None, "description",
+        )
+        assert len(result["thread"]) == 1
+        assert result["thread"][0]["action"] == "raise"
+        assert result["thread"][0]["model_id"] == "human"
+
+
 class TestSessionNotFound:
     def test_get_nonexistent_session(self, manager):
         with pytest.raises(KeyError, match="Session not found"):

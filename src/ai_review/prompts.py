@@ -7,9 +7,9 @@ def build_review_prompt(
     session_id: str,
     model_id: str,
     role: str,
-    mcp_server_url: str,
+    api_base_url: str,
 ) -> str:
-    """Build a prompt that instructs an LLM to perform a code review via MCP tools."""
+    """Build a prompt that instructs an LLM to perform a code review via REST API."""
     parts = [
         f"You are a code reviewer (model: {model_id}).",
     ]
@@ -20,12 +20,15 @@ def build_review_prompt(
         "",
         "## Instructions",
         "",
-        "You have access to ai-review MCP tools. Follow these steps exactly:",
+        "Follow these steps exactly:",
         "",
-        f"1. Call `get_review_context` to retrieve the diff and project knowledge.",
+        f"1. Retrieve the diff and project knowledge:",
+        f"   curl {api_base_url}/api/sessions/{session_id}/context",
         "2. Review the code changes thoroughly based on your assigned focus area.",
-        "3. Call `submit_review` with your findings:",
-        f'   - model_id: "{model_id}"',
+        f"3. Submit your review:",
+        f"   curl -X POST {api_base_url}/api/sessions/{session_id}/reviews \\",
+        f'     -H "Content-Type: application/json" \\',
+        f'     -d \'{{"model_id": "{model_id}", "issues": [...], "summary": "..."}}\'',
         "   - issues: list of objects with fields: title, severity (critical/high/medium/low), file, line, description, suggestion",
         "   - summary: brief overall assessment",
         "",
@@ -34,7 +37,9 @@ def build_review_prompt(
         "- Review independently. Do not ask for human input.",
         "- Be specific: include file paths and line numbers.",
         "- Only report real issues. Do not fabricate problems.",
-        "- Complete the review in a single turn by calling the MCP tools.",
+        "- If you find no issues, you MUST still submit a review with an empty issues list and a summary.",
+        "- Complete the review in a single turn.",
+        "- Write all title, description, suggestion, and summary fields in Korean.",
         f"- Session ID: {session_id}",
     ])
     return "\n".join(parts)
@@ -44,7 +49,7 @@ def build_deliberation_prompt(
     session_id: str,
     model_id: str,
     issue_ids: list[str],
-    mcp_server_url: str,
+    api_base_url: str,
 ) -> str:
     """Build a prompt that instructs an LLM to deliberate on pending issues."""
     issue_list = "\n".join(f"  - {iid}" for iid in issue_ids)
@@ -57,11 +62,13 @@ def build_deliberation_prompt(
         "",
         "For each issue ID listed below:",
         "",
-        "1. Call `get_issue_thread` with the issue_id to read the issue details and discussion.",
+        f"1. Retrieve the issue thread:",
+        f"   curl {api_base_url}/api/issues/{{issue_id}}/thread",
         "2. Analyze the issue carefully — consider the code context, severity, and other opinions.",
-        "3. Call `submit_opinion` with:",
-        f'   - model_id: "{model_id}"',
-        "   - issue_id: the issue ID",
+        f"3. Submit your opinion:",
+        f"   curl -X POST {api_base_url}/api/issues/{{issue_id}}/opinions \\",
+        f'     -H "Content-Type: application/json" \\',
+        f'     -d \'{{"model_id": "{model_id}", "action": "...", "reasoning": "...", "suggested_severity": "..."}}\'',
         "   - action: one of agree/disagree/clarify",
         "   - reasoning: your analysis (be specific)",
         "   - suggested_severity: your recommended severity (critical/high/medium/low) if you agree",
@@ -75,6 +82,7 @@ def build_deliberation_prompt(
         "- Process ALL listed issues.",
         "- Deliberate independently. Do not ask for human input.",
         "- Be concise but substantive in your reasoning.",
+        "- Write all reasoning in Korean.",
         f"- Session ID: {session_id}",
     ]
     return "\n".join(parts)

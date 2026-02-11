@@ -1,6 +1,8 @@
 """Tests for git diff parsing."""
 
-from ai_review.git_diff import get_diff_summary, parse_diff
+import pytest
+
+from ai_review.git_diff import get_current_branch, get_diff_summary, parse_diff
 
 SAMPLE_NUMSTAT = """\
 10\t3\tsrc/main.py
@@ -77,6 +79,13 @@ class TestParseDiff:
         assert files[0].path == "foo.py"
         assert files[0].additions == 3
         assert files[0].content == ""
+
+
+class TestGetCurrentBranch:
+    @pytest.mark.asyncio
+    async def test_returns_string(self):
+        result = await get_current_branch()
+        assert isinstance(result, str) and len(result) > 0
 
 
 class TestGetDiffSummary:

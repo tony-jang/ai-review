@@ -1,42 +1,10 @@
 """Tests for ClaudeCodeTrigger."""
 
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from ai_review.trigger.cc import ClaudeCodeTrigger
-
-
-class TestMcpConfig:
-    def test_ensure_mcp_config_creates_file(self):
-        trigger = ClaudeCodeTrigger(mcp_server_url="http://localhost:9000/mcp")
-        path = trigger._ensure_mcp_config()
-
-        assert path.exists()
-        config = json.loads(path.read_text())
-        assert config["mcpServers"]["ai-review"]["url"] == "http://localhost:9000/mcp"
-
-        trigger._tmp_dir.cleanup()
-
-    def test_ensure_mcp_config_idempotent(self):
-        trigger = ClaudeCodeTrigger(mcp_server_url="http://localhost:9000/mcp")
-        path1 = trigger._ensure_mcp_config()
-        path2 = trigger._ensure_mcp_config()
-
-        assert path1 == path2
-
-        trigger._tmp_dir.cleanup()
-
-    @pytest.mark.asyncio
-    async def test_close_cleans_up(self):
-        trigger = ClaudeCodeTrigger(mcp_server_url="http://localhost:9000/mcp")
-        trigger._ensure_mcp_config()
-
-        await trigger.close()
-
-        assert trigger._mcp_config_path is None
-        assert trigger._tmp_dir is None
 
 
 class TestCreateSession:
@@ -54,11 +22,10 @@ class TestCreateSession:
 
 class TestSendPrompt:
     @pytest.mark.asyncio
-    async def test_args_include_mcp_config(self):
-        """send_prompt passes --mcp-config and -p flags correctly."""
-        trigger = ClaudeCodeTrigger(mcp_server_url="http://localhost:9000/mcp")
+    async def test_args_no_mcp_config(self):
+        """send_prompt does not pass --mcp-config flag."""
+        trigger = ClaudeCodeTrigger()
 
-        # Mock create_subprocess_exec to capture the args
         captured_args = []
 
         async def fake_exec(*args, **kwargs):
@@ -76,9 +43,13 @@ class TestSendPrompt:
 
         # Verify args structure
         assert "claude" in captured_args
-        assert "--mcp-config" in captured_args
         assert "-p" in captured_args
         assert "do review" in captured_args
+        assert "--print" in captured_args
+        assert "--allowedTools" in captured_args
+        assert "Bash(curl:*) Read" in captured_args
+        # No --mcp-config
+        assert "--mcp-config" not in captured_args
         # No --resume
         assert "--resume" not in captured_args
 
@@ -87,7 +58,7 @@ class TestSendPrompt:
     @pytest.mark.asyncio
     async def test_handles_file_not_found(self):
         """send_prompt returns graceful error when claude CLI is missing."""
-        trigger = ClaudeCodeTrigger(mcp_server_url="http://localhost:9000/mcp")
+        trigger = ClaudeCodeTrigger()
 
         async def raise_not_found(*args, **kwargs):
             raise FileNotFoundError("claude not found")
@@ -104,7 +75,7 @@ class TestSendPrompt:
     @pytest.mark.asyncio
     async def test_handles_process_failure(self):
         """send_prompt handles non-zero exit code."""
-        trigger = ClaudeCodeTrigger(mcp_server_url="http://localhost:9000/mcp")
+        trigger = ClaudeCodeTrigger()
 
         async def fake_exec(*args, **kwargs):
             proc = AsyncMock()

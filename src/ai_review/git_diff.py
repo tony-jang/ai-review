@@ -20,6 +20,19 @@ _STAT_LINE = re.compile(
 _NUMSTAT_LINE = re.compile(r"^(\d+|-)\t(\d+|-)\t(.+)$", re.MULTILINE)
 
 
+async def get_current_branch(repo_path: str | Path | None = None) -> str:
+    """Return the current branch name (or 'HEAD' on detached head)."""
+    cwd = str(repo_path) if repo_path else None
+    proc = await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "--abbrev-ref", "HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    stdout, _ = await proc.communicate()
+    return stdout.decode().strip() or "HEAD"
+
+
 async def collect_diff(base: str = "main", repo_path: str | Path | None = None) -> list[DiffFile]:
     """Run git diff and parse into DiffFile list."""
     cwd = str(repo_path) if repo_path else None

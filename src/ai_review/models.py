@@ -125,6 +125,27 @@ class ModelConfig(BaseModel):
     role: str = ""
 
 
+class AgentStatus(str, enum.Enum):
+    WAITING = "waiting"
+    REVIEWING = "reviewing"
+    SUBMITTED = "submitted"
+    FAILED = "failed"
+
+
+class AgentTaskType(str, enum.Enum):
+    REVIEW = "review"
+    DELIBERATION = "deliberation"
+
+
+class AgentState(BaseModel):
+    model_id: str
+    status: AgentStatus = AgentStatus.WAITING
+    task_type: AgentTaskType = AgentTaskType.REVIEW
+    prompt_preview: str = ""
+    started_at: datetime | None = None
+    submitted_at: datetime | None = None
+
+
 class SessionConfig(BaseModel):
     models: list[ModelConfig] = Field(default_factory=list)
     max_turns: int = 3
@@ -137,11 +158,13 @@ class SessionConfig(BaseModel):
 class ReviewSession(BaseModel):
     id: str = Field(default_factory=_uuid)
     base: str = "main"
+    head: str = ""
     status: SessionStatus = SessionStatus.IDLE
     diff: list[DiffFile] = Field(default_factory=list)
     knowledge: Knowledge = Field(default_factory=Knowledge)
     reviews: list[Review] = Field(default_factory=list)
     issues: list[Issue] = Field(default_factory=list)
     client_sessions: dict[str, str] = Field(default_factory=dict)
+    agent_states: dict[str, AgentState] = Field(default_factory=dict)
     config: SessionConfig = Field(default_factory=SessionConfig)
     created_at: datetime = Field(default_factory=_utcnow)

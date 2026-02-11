@@ -44,7 +44,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .main { display: flex; flex: 1; overflow: hidden; }
 
 /* Issue list */
-.issue-list { width: 300px; min-width: 300px; border-right: 1px solid var(--border); overflow-y: auto; }
+.issue-list { overflow-y: auto; }
 .issue-item { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; align-items: flex-start; gap: 8px; transition: background 0.15s; }
 .issue-item:hover { background: rgba(88,166,255,0.06); }
 .issue-item.active { background: rgba(88,166,255,0.1); border-left: 3px solid var(--accent); }
@@ -178,6 +178,48 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 
 .summary-bar { padding: 8px 20px; border-top: 1px solid var(--border); background: var(--card); font-size: 12px; color: var(--text-muted); }
 
+/* File panel */
+.file-panel { border-bottom: 1px solid var(--border); }
+.file-panel-header { padding: 8px 14px; font-size: 12px; font-weight: 600; color: var(--text-muted); display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.file-panel-header:hover { color: var(--text); }
+.file-panel-header .toggle { transition: transform 0.2s; }
+.file-panel-header .toggle.collapsed { transform: rotate(-90deg); }
+.file-panel-list { max-height: 200px; overflow-y: auto; }
+.file-panel-list.collapsed { display: none; }
+.file-item { padding: 4px 14px; font-size: 12px; font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: background 0.15s; white-space: nowrap; overflow: hidden; }
+.file-item:hover { background: rgba(88,166,255,0.06); }
+.file-item .dir { color: var(--text-muted); }
+.file-item .name { color: var(--text); }
+.file-item .stats { margin-left: auto; font-size: 11px; flex-shrink: 0; }
+.file-item .add { color: var(--diff-add-text); }
+.file-item .del { color: var(--diff-del-text); }
+
+/* Agent panel */
+.agent-panel { padding: 8px 20px; border-bottom: 1px solid var(--border); background: var(--card); }
+.agent-panel-title { font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; }
+.agent-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.agent-card { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+.agent-card .model-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.agent-card .agent-name { font-weight: 600; }
+.agent-card .agent-role { color: var(--text-muted); font-size: 11px; }
+.agent-card .agent-time { color: var(--text-muted); font-size: 11px; font-family: 'SF Mono', Monaco, monospace; }
+.agent-status-reviewing { border-color: var(--accent); }
+.agent-status-reviewing .model-dot { animation: agent-pulse 1.5s infinite; }
+@keyframes agent-pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.agent-status-submitted { border-color: #22C55E40; }
+.agent-status-submitted .model-dot { background: #22C55E !important; }
+.agent-status-failed { border-color: #EF444440; }
+.agent-status-failed .model-dot { background: #EF4444 !important; }
+.agent-task-badge { font-size: 10px; padding: 1px 5px; border-radius: 8px; font-weight: 600; }
+.task-review { background: rgba(88,166,255,0.15); color: var(--accent); }
+.task-deliberation { background: rgba(139,92,246,0.15); color: var(--model-opus); }
+.agent-card .prompt-preview { display: none; font-size: 11px; color: var(--text-muted); margin-top: 4px; font-family: 'SF Mono', Monaco, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px; }
+.agent-card:hover .prompt-preview { display: block; }
+
+/* Resize handle */
+.resize-handle { width: 4px; cursor: col-resize; background: var(--border); transition: background 0.15s; flex-shrink: 0; }
+.resize-handle:hover, .resize-handle.active { background: var(--accent); }
+
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
@@ -202,10 +244,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   <span class="progress-label" id="progress-label">대기 중</span>
 </div>
 
+<div class="agent-panel" id="agent-panel" style="display:none">
+  <div class="agent-panel-title">에이전트</div>
+  <div class="agent-list" id="agent-list"></div>
+</div>
+
 <div class="main">
-  <div class="issue-list" id="issue-list">
-    <div class="empty-state"><div class="icon">&#128269;</div><div class="message">이슈가 없습니다</div><div class="hint">리뷰 세션을 시작하세요</div></div>
+  <div id="left-panel" style="width:300px;min-width:200px;max-width:600px;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden">
+    <div class="file-panel" id="file-panel" style="display:none">
+      <div class="file-panel-header" onclick="toggleFilePanel()">
+        <span class="toggle" id="file-toggle">▾</span>
+        <span>변경 파일</span>
+        <span id="file-count" style="margin-left:auto;color:var(--accent)"></span>
+      </div>
+      <div class="file-panel-list" id="file-list"></div>
+    </div>
+    <div class="issue-list" id="issue-list" style="flex:1;overflow-y:auto">
+      <div class="empty-state"><div class="icon">&#128269;</div><div class="message">이슈가 없습니다</div><div class="hint">리뷰 세션을 시작하세요</div></div>
+    </div>
   </div>
+  <div class="resize-handle" id="resize-handle"></div>
   <div class="issue-detail" id="issue-detail">
     <div class="empty-state"><div class="icon">&#128221;</div><div class="message">이슈를 선택하세요</div><div class="hint">이슈를 클릭하면 코드와 토론을 볼 수 있습니다</div></div>
   </div>
@@ -222,7 +280,8 @@ const ACTION_LABELS = { raise:'제기', agree:'동의', disagree:'반대', clari
 const PHASE_PROGRESS = { idle:0, collecting:10, reviewing:30, dedup:50, deliberating:70, complete:100 };
 const PHASE_LABELS = { idle:'대기 중', collecting:'변경사항 수집 중...', reviewing:'리뷰 중...', dedup:'중복 제거 중...', deliberating:'토론 중...', complete:'완료' };
 
-let state = { sessionId:null, status:'idle', issues:[], selectedIssue:null, diffCache:{} };
+let state = { sessionId:null, status:'idle', issues:[], selectedIssue:null, diffCache:{}, files:[], agents:[] };
+let agentTimerInterval = null;
 
 function getModelColor(id) {
   const k = Object.keys(MODEL_COLORS).find(k => id.toLowerCase().includes(k));
@@ -231,6 +290,106 @@ function getModelColor(id) {
 function esc(s) { if(!s) return ''; const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 function sevLabel(s) { return SEVERITY_LABELS[s]||s; }
 function actLabel(a) { return ACTION_LABELS[a]||a; }
+
+function toggleFilePanel() {
+  const list = document.getElementById('file-list');
+  const toggle = document.getElementById('file-toggle');
+  list.classList.toggle('collapsed');
+  toggle.classList.toggle('collapsed');
+}
+
+function renderFilePanel() {
+  const panel = document.getElementById('file-panel');
+  if (!state.files.length) { panel.style.display='none'; return; }
+  panel.style.display='';
+  document.getElementById('file-count').textContent = state.files.length + '개';
+  const list = document.getElementById('file-list');
+  list.innerHTML = state.files.map(f => {
+    const parts = f.path.split('/');
+    const name = parts.pop();
+    const dir = parts.length ? parts.join('/') + '/' : '';
+    return `<div class="file-item" onclick="filterByFile('${esc(f.path)}')"><span class="dir">${esc(dir)}</span><span class="name">${esc(name)}</span><span class="stats"><span class="add">+${f.additions}</span> <span class="del">-${f.deletions}</span></span></div>`;
+  }).join('');
+}
+
+async function filterByFile(path) {
+  const match = state.issues.find(i => i.file === path);
+  if (match) { selectIssue(match.id); return; }
+  // No matching issue — show standalone diff viewer
+  state.selectedIssue = null;
+  renderIssueList();
+  await renderFileDiff(path);
+}
+
+async function renderFileDiff(path) {
+  const el = document.getElementById('issue-detail');
+  const diffContent = await fetchDiff(path);
+  const fileInfo = state.files.find(f => f.path === path);
+  el.innerHTML = `
+    <div class="detail-header-bar">
+      <div class="detail-title" style="font-family:'SF Mono',Monaco,monospace">${esc(path)}</div>
+      <div class="detail-badges" style="margin-top:8px">
+        ${fileInfo ? `<span class="add">+${fileInfo.additions}</span> <span class="del">-${fileInfo.deletions}</span>` : ''}
+        <button class="btn" onclick="createIssueFromFile('${esc(path)}')">+ 이슈 등록</button>
+      </div>
+    </div>
+    <div class="diff-container">
+      <div class="diff-file-header"><span class="filename">${esc(path)}</span></div>
+      ${diffContent ? renderDiff(diffContent, {}) : '<div class="diff-loading">변경 내역 없음</div>'}
+    </div>`;
+}
+
+function formatElapsed(sec) {
+  if (sec == null) return '';
+  if (sec < 60) return Math.floor(sec) + 's';
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return m + 'm ' + s + 's';
+}
+
+function renderAgentPanel() {
+  const panel = document.getElementById('agent-panel');
+  if (!state.agents.length) { panel.style.display='none'; stopAgentTimer(); return; }
+  panel.style.display='';
+  const list = document.getElementById('agent-list');
+  let hasReviewing = false;
+  const TASK_LABELS = { review: '리뷰', deliberation: '토론' };
+  list.innerHTML = state.agents.map(a => {
+    const color = getModelColor(a.model_id);
+    const statusCls = 'agent-status-' + a.status;
+    const statusLabel = a.status === 'reviewing' ? '리뷰 중' : a.status === 'submitted' ? '완료' : a.status === 'failed' ? '실패' : '대기';
+    const elapsed = formatElapsed(a.elapsed_seconds);
+    const taskType = a.task_type || 'review';
+    const taskLabel = TASK_LABELS[taskType] || taskType;
+    if (a.status === 'reviewing') hasReviewing = true;
+    return `<div class="agent-card ${statusCls}" style="flex-direction:column;align-items:flex-start">
+      <div style="display:flex;align-items:center;gap:6px;width:100%">
+        <span class="model-dot" style="background:${color}"></span>
+        <span class="agent-name">${esc(a.model_id)}</span>
+        <span class="agent-task-badge task-${taskType}">${taskLabel}</span>
+        ${a.role ? `<span class="agent-role">${esc(a.role)}</span>` : ''}
+        <span>${statusLabel}</span>
+        ${elapsed ? `<span class="agent-time">${elapsed}</span>` : ''}
+      </div>
+      ${a.prompt_preview ? `<div class="prompt-preview">${esc(a.prompt_preview)}</div>` : ''}
+    </div>`;
+  }).join('');
+  if (hasReviewing) startAgentTimer(); else stopAgentTimer();
+}
+
+function startAgentTimer() {
+  if (agentTimerInterval) return;
+  agentTimerInterval = setInterval(() => {
+    state.agents.forEach(a => {
+      if (a.status === 'reviewing' && a.elapsed_seconds != null) a.elapsed_seconds += 1;
+    });
+    renderAgentPanel();
+  }, 1000);
+}
+
+function stopAgentTimer() {
+  if (agentTimerInterval) { clearInterval(agentTimerInterval); agentTimerInterval = null; }
+}
 
 function renderIssueList() {
   const el = document.getElementById('issue-list');
@@ -254,6 +413,12 @@ function renderIssueList() {
       </div>
     </div>`;
   }).join('');
+  // Add manual issue creation button (only when not complete)
+  if (state.status !== 'complete') {
+    el.innerHTML += `<div style="padding:10px 14px;border-bottom:1px solid var(--border)">
+      <button class="btn" style="width:100%;text-align:center" onclick="createIssueFromFile('')">+ 이슈 등록</button>
+    </div>`;
+  }
 }
 
 function parseDiffLines(content) {
@@ -527,6 +692,54 @@ function copyCliCommand(issueId) {
   });
 }
 
+function createIssueFromFile(filePath) {
+  const overlay = document.createElement('div');
+  overlay.className = 'report-overlay';
+  const inputStyle = 'background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;font-family:inherit;width:100%';
+  overlay.innerHTML = `<div class="report-card" style="max-width:500px">
+    <div class="report-header"><h2>이슈 등록</h2><button class="report-close" onclick="this.closest('.report-overlay').remove()">\u2715</button></div>
+    <div style="padding:20px;display:flex;flex-direction:column;gap:12px">
+      <input id="new-issue-title" placeholder="제목" style="${inputStyle}">
+      <div style="display:flex;gap:8px">
+        <input id="new-issue-file" value="${esc(filePath)}" style="flex:1;${inputStyle}">
+        <input id="new-issue-line" placeholder="라인" type="number" style="width:80px;${inputStyle}">
+      </div>
+      <select id="new-issue-severity" style="${inputStyle}">
+        <option value="critical">심각</option>
+        <option value="high">높음</option>
+        <option value="medium" selected>보통</option>
+        <option value="low">낮음</option>
+      </select>
+      <textarea id="new-issue-desc" placeholder="설명" rows="4" style="${inputStyle};resize:vertical"></textarea>
+      <textarea id="new-issue-suggestion" placeholder="수정 제안 (선택)" rows="2" style="${inputStyle};resize:vertical"></textarea>
+      <button class="btn btn-primary" onclick="submitNewIssue(this)" style="align-self:flex-end">등록</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+}
+
+async function submitNewIssue(btn) {
+  btn.disabled = true;
+  const data = {
+    title: document.getElementById('new-issue-title').value.trim(),
+    severity: document.getElementById('new-issue-severity').value,
+    file: document.getElementById('new-issue-file').value.trim(),
+    line: parseInt(document.getElementById('new-issue-line').value) || null,
+    description: document.getElementById('new-issue-desc').value.trim(),
+    suggestion: document.getElementById('new-issue-suggestion').value.trim(),
+  };
+  if (!data.title || !data.file) { alert('제목과 파일은 필수입니다'); btn.disabled = false; return; }
+  try {
+    const r = await fetch(`/api/sessions/${state.sessionId}/issues`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data),
+    });
+    if (!r.ok) { const e = await r.json(); alert(e.detail || '오류'); btn.disabled = false; return; }
+    btn.closest('.report-overlay').remove();
+    await pollStatus();
+  } catch (e) { alert('등록 실패'); btn.disabled = false; }
+}
+
 async function submitOpinion(issueId, action) {
   const text = document.getElementById('comment-text')?.value?.trim();
   if (!text) { alert('의견을 작성해주세요.'); return; }
@@ -606,11 +819,16 @@ async function pollStatus() {
     const r = await fetch(`/api/sessions/${state.sessionId}/status`);
     const d = await r.json();
     state.status = d.status;
+    state.files = d.files || [];
+    state.agents = d.agents || [];
     document.getElementById('stat-files').textContent = '파일 '+d.files_changed+'개';
     document.getElementById('stat-reviews').textContent = '리뷰 '+d.review_count+'개';
     document.getElementById('stat-issues').textContent = '이슈 '+d.issue_count+'개';
-    document.getElementById('branch-info').textContent = d.base ? `\u2192 ${d.base}` : '--';
+    const branchText = d.head ? `${d.head} \u2192 ${d.base}` : (d.base ? `\u2192 ${d.base}` : '--');
+    document.getElementById('branch-info').textContent = branchText;
     updateProgress();
+    renderFilePanel();
+    renderAgentPanel();
 
     // Show/hide action buttons based on status
     const btnProcess = document.getElementById('btn-process');
@@ -619,9 +837,15 @@ async function pollStatus() {
     btnFinish.style.display = (d.status === 'deliberating' || d.status === 'reviewing') ? '' : 'none';
 
     const ir = await fetch(`/api/sessions/${state.sessionId}/issues`);
-    if (ir.ok) { state.issues = await ir.json(); }
-    renderIssueList();
-    if (state.selectedIssue) renderIssueDetail();
+    if (ir.ok) {
+      const prev = state.selectedIssue ? JSON.stringify(state.issues.find(i => i.id === state.selectedIssue)) : null;
+      state.issues = await ir.json();
+      renderIssueList();
+      const curr = state.selectedIssue ? JSON.stringify(state.issues.find(i => i.id === state.selectedIssue)) : null;
+      if (state.selectedIssue && prev !== curr) renderIssueDetail();
+    } else {
+      renderIssueList();
+    }
     updateSummary();
   } catch(e) {}
 }
@@ -631,8 +855,26 @@ function connectSSE(sid) {
   src.addEventListener('phase_change', ()=>pollStatus());
   src.addEventListener('review_submitted', ()=>pollStatus());
   src.addEventListener('opinion_submitted', ()=>pollStatus());
+  src.addEventListener('agent_status', ()=>pollStatus());
+  src.addEventListener('issue_created', ()=>pollStatus());
   src.onerror = ()=>{ src.close(); setTimeout(()=>{ if(state.sessionId) connectSSE(state.sessionId); }, 3000); };
 }
+
+// Panel resize
+(function initResize() {
+  const handle = document.getElementById('resize-handle');
+  const left = document.getElementById('left-panel');
+  if (!handle || !left) return;
+  let startX, startW;
+  handle.addEventListener('mousedown', (e) => {
+    startX = e.clientX; startW = left.offsetWidth;
+    handle.classList.add('active');
+    const onMove = (e) => { left.style.width = Math.max(200, Math.min(600, startW + e.clientX - startX)) + 'px'; };
+    const onUp = () => { handle.classList.remove('active'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+})();
 
 async function init() {
   try {

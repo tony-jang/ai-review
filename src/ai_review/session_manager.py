@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from ai_review.git_diff import collect_diff, get_diff_summary, parse_diff
+from ai_review.git_diff import collect_diff, get_current_branch, get_diff_summary, parse_diff
 from ai_review.knowledge import load_config, load_knowledge
 from ai_review.models import (
     DiffFile,
@@ -18,6 +18,7 @@ from ai_review.models import (
     ReviewSession,
     SessionStatus,
     Severity,
+    _utcnow,
 )
 from ai_review.sse import SSEBroker
 from ai_review.state import InvalidTransitionError, transition
@@ -67,6 +68,7 @@ class SessionManager:
 
         # Collect diff
         if self.repo_path:
+            session.head = await get_current_branch(self.repo_path)
             session.diff = await collect_diff(base, self.repo_path)
             session.knowledge = load_knowledge(self.repo_path)
 
@@ -76,6 +78,7 @@ class SessionManager:
 
         summary = get_diff_summary(session.diff)
         summary["session_id"] = session.id
+        summary["head"] = session.head
         return summary
 
     def get_review_context(self, session_id: str, file: str | None = None) -> dict:
@@ -239,10 +242,75 @@ class SessionManager:
             "session_id": session.id,
             "status": session.status.value,
             "base": session.base,
+            "head": session.head,
             "review_count": len(session.reviews),
             "issue_count": len(session.issues),
             "files_changed": len(session.diff),
+            "files": [
+                {"path": f.path, "additions": f.additions, "deletions": f.deletions}
+                for f in session.diff
+            ],
+            "agents": self._get_agent_statuses(session),
         }
+
+    def _get_agent_statuses(self, session: ReviewSession) -> list[dict]:
+        """Build agent status list for the UI."""
+        result = []
+        for model_id, agent in session.agent_states.items():
+            elapsed = None
+            if agent.started_at:
+                end = agent.submitted_at or _utcnow()
+                elapsed = (end - agent.started_at).total_seconds()
+            result.append({
+                "model_id": model_id,
+                "status": agent.status.value,
+                "task_type": agent.task_type.value,
+                "prompt_preview": agent.prompt_preview,
+                "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
+                "role": next(
+                    (m.role for m in session.config.models if m.id == model_id), ""
+                ),
+            })
+        return result
+
+    def add_manual_issue(
+        self,
+        session_id: str,
+        title: str,
+        severity: str,
+        file: str,
+        line: int | None,
+        description: str,
+        suggestion: str = "",
+    ) -> dict:
+        """Add a manually created issue to the session."""
+        session = self.get_session(session_id)
+        if session.status not in (SessionStatus.REVIEWING, SessionStatus.DELIBERATING):
+            raise ValueError(f"Cannot add issue in {session.status.value} state")
+
+        issue = Issue(
+            title=title,
+            severity=Severity(severity),
+            file=file,
+            line=line,
+            description=description,
+            suggestion=suggestion,
+            raised_by="human",
+            thread=[
+                Opinion(
+                    model_id="human",
+                    action=OpinionAction.RAISE,
+                    reasoning=description,
+                    suggested_severity=Severity(severity),
+                )
+            ],
+        )
+        session.issues.append(issue)
+        self.broker.publish(
+            "issue_created",
+            {"session_id": session_id, "issue_id": issue.id, "title": title},
+        )
+        return issue.model_dump(mode="json")
 
     def get_final_report(self, session_id: str) -> dict:
         """Generate the final report."""

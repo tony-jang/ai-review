@@ -23,12 +23,15 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     manager = SessionManager(repo_path=repo_path)
     set_manager(manager)
 
-    mcp_server_url = f"http://localhost:{port}/mcp"
-    orchestrator = Orchestrator(manager, mcp_server_url=mcp_server_url)
+    api_base_url = f"http://localhost:{port}"
+    orchestrator = Orchestrator(manager, api_base_url=api_base_url)
+
+    mcp_http_app = mcp.http_app(path="")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
+        async with mcp_http_app.lifespan(app):
+            yield
         await orchestrator.close()
 
     app = FastAPI(title="AI Review", version="0.1.0", lifespan=lifespan)
@@ -83,6 +86,25 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
             return JSONResponse(manager.get_issues(session_id))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
+
+    @app.post("/api/sessions/{session_id}/issues")
+    async def api_create_issue(session_id: str, request: Request):
+        body = await request.json()
+        try:
+            result = manager.add_manual_issue(
+                session_id,
+                body["title"],
+                body["severity"],
+                body["file"],
+                body.get("line"),
+                body.get("description", ""),
+                body.get("suggestion", ""),
+            )
+            return JSONResponse(result, status_code=201)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     @app.get("/api/issues/{issue_id}/thread")
     async def api_get_thread(issue_id: str):
@@ -362,7 +384,7 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         )
 
     # --- MCP mount ---
-    app.mount("/mcp", mcp.http_app())
+    app.mount("/mcp", mcp_http_app)
 
     # --- Static files ---
     if STATIC_DIR.exists():

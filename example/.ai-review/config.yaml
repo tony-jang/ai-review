@@ -17,6 +17,12 @@ models:
     model_id: gemini-3.0-pro
     role: "맥락 일관성, 타입 안전성"
 
+  - id: codex
+    client_type: codex
+    provider: openai
+    model_id: gpt-5-codex
+    role: "코드 품질, 리팩토링 제안"
+
 deliberation:
   max_turns: 3
   consensus_threshold: 2

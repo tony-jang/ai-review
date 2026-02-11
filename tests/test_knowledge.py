@@ -112,6 +112,6 @@ class TestLoadConfig:
         """Verify the example config can be loaded."""
         example_path = Path(__file__).parent.parent / "example"
         config = load_config(example_path)
-        assert len(config.models) == 3
+        assert len(config.models) == 4
         assert config.max_turns == 3
         assert config.consensus_threshold == 2

@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ai_review.models import (
+    AgentStatus,
+    AgentTaskType,
     ModelConfig,
     ReviewSession,
     SessionConfig,
@@ -70,7 +72,7 @@ class TestOrchestratorStart:
             ModelConfig(id="gpt", client_type="opencode", role="performance"),
         ]
         mgr, session = _make_manager_with_config(models)
-        orch = Orchestrator(mgr, mcp_server_url="http://localhost:3000/mcp")
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         # Replace triggers with mocks
         mock_a = MockTrigger()
@@ -99,7 +101,7 @@ class TestOrchestratorStart:
     @pytest.mark.asyncio
     async def test_start_no_models_stays_manual(self):
         mgr, session = _make_manager_with_config([])
-        orch = Orchestrator(mgr, mcp_server_url="http://localhost:3000/mcp")
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         await orch.start(session.id)
         # No triggers created
@@ -111,7 +113,7 @@ class TestOrchestratorStart:
 class TestCallbackRegistration:
     def test_callbacks_registered(self):
         mgr = SessionManager(repo_path=None)
-        orch = Orchestrator(mgr, mcp_server_url="http://localhost:3000/mcp")
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         assert mgr.on_review_submitted is not None
         assert mgr.on_opinion_submitted is not None
@@ -119,7 +121,7 @@ class TestCallbackRegistration:
     @pytest.mark.asyncio
     async def test_callbacks_detached_on_close(self):
         mgr = SessionManager(repo_path=None)
-        orch = Orchestrator(mgr, mcp_server_url="http://localhost:3000/mcp")
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         await orch.close()
 
@@ -135,11 +137,15 @@ class TestReviewSubmittedCallback:
             ModelConfig(id="gpt", client_type="claude-code"),
         ]
         mgr, session = _make_manager_with_config(models)
-        orch = Orchestrator(mgr, mcp_server_url="http://localhost:3000/mcp")
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # Initialize agent states (normally done by start())
+        from ai_review.models import AgentState
+        session.agent_states["opus"] = AgentState(model_id="opus")
+        session.agent_states["gpt"] = AgentState(model_id="gpt")
 
         # Replace _advance_to_deliberation with a spy
         advance_called = asyncio.Event()
-        original_advance = orch._advance_to_deliberation
 
         async def spy_advance(sid):
             advance_called.set()
@@ -154,7 +160,37 @@ class TestReviewSubmittedCallback:
             {"title": "Bug B", "severity": "medium", "file": "b.py", "description": "desc"}
         ])
 
-        # Give the asyncio event loop a moment to process
+        await asyncio.sleep(0.05)
+        assert advance_called.is_set()
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_advances_when_some_failed_and_rest_submitted(self):
+        """If one agent fails and the other submits, auto-advance should trigger."""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="codex", client_type="codex"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        from ai_review.models import AgentState
+        session.agent_states["opus"] = AgentState(model_id="opus", status=AgentStatus.FAILED)
+        session.agent_states["codex"] = AgentState(model_id="codex")
+
+        advance_called = asyncio.Event()
+
+        async def spy_advance(sid):
+            advance_called.set()
+
+        orch._advance_to_deliberation = spy_advance
+
+        # Only codex submits
+        mgr.submit_review(session.id, "codex", [
+            {"title": "Bug", "severity": "high", "file": "a.py", "description": "desc"}
+        ])
+
         await asyncio.sleep(0.05)
         assert advance_called.is_set()
 
@@ -167,7 +203,12 @@ class TestReviewSubmittedCallback:
             ModelConfig(id="gpt", client_type="claude-code"),
         ]
         mgr, session = _make_manager_with_config(models)
-        orch = Orchestrator(mgr, mcp_server_url="http://localhost:3000/mcp")
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # Initialize agent states — only opus will submit, gpt still reviewing
+        from ai_review.models import AgentState
+        session.agent_states["opus"] = AgentState(model_id="opus")
+        session.agent_states["gpt"] = AgentState(model_id="gpt", status=AgentStatus.REVIEWING)
 
         advance_called = asyncio.Event()
 
@@ -176,7 +217,7 @@ class TestReviewSubmittedCallback:
 
         orch._advance_to_deliberation = spy_advance
 
-        # Submit only one review
+        # Submit only one review — gpt still reviewing
         mgr.submit_review(session.id, "opus", [
             {"title": "Bug A", "severity": "high", "file": "a.py", "description": "desc"}
         ])
@@ -195,7 +236,7 @@ class TestAdvanceToDeliberation:
             ModelConfig(id="gpt", client_type="claude-code"),
         ]
         mgr, session = _make_manager_with_config(models)
-        orch = Orchestrator(mgr, mcp_server_url="http://localhost:3000/mcp")
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         # Set up mock triggers
         mock_trigger = MockTrigger()
@@ -234,7 +275,7 @@ class TestFinish:
         models = [ModelConfig(id="opus", client_type="claude-code")]
         mgr, session = _make_manager_with_config(models)
         session.status = SessionStatus.DELIBERATING
-        orch = Orchestrator(mgr, mcp_server_url="http://localhost:3000/mcp")
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         await orch._finish(session.id)
 
@@ -253,7 +294,7 @@ class TestFullCycleWithMocks:
             ModelConfig(id="gpt", client_type="claude-code", role="perf"),
         ]
         mgr, session = _make_manager_with_config(models)
-        orch = Orchestrator(mgr, mcp_server_url="http://localhost:3000/mcp")
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         # Replace trigger creation with mocks
         mock_trigger = MockTrigger()
@@ -296,3 +337,213 @@ class TestFullCycleWithMocks:
         assert session.status == SessionStatus.COMPLETE
         for issue in session.issues:
             assert issue.consensus is True
+
+
+class SlowMockTrigger(TriggerEngine):
+    """A trigger that blocks until explicitly released."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+
+    async def create_session(self, model_id: str) -> str:
+        return f"slow-{model_id}"
+
+    async def send_prompt(self, client_session_id, model_id, prompt):
+        await self.release.wait()
+        return TriggerResult(success=True, output="ok", client_session_id=client_session_id)
+
+    async def close(self):
+        self.release.set()
+
+
+class TestAgentStateTracking:
+    @pytest.mark.asyncio
+    async def test_agent_states_initialized_on_start(self):
+        models = [
+            ModelConfig(id="opus", client_type="claude-code", role="security"),
+            ModelConfig(id="gpt", client_type="claude-code", role="performance"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # Use slow trigger so agents stay in REVIEWING
+        slow = SlowMockTrigger()
+        orch._create_trigger = lambda ct: slow
+
+        await orch.start(session.id)
+        await asyncio.sleep(0.05)
+
+        assert "opus" in session.agent_states
+        assert "gpt" in session.agent_states
+        assert session.agent_states["opus"].status == AgentStatus.REVIEWING
+        assert session.agent_states["gpt"].status == AgentStatus.REVIEWING
+        assert session.agent_states["opus"].started_at is not None
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_agent_marked_submitted_after_review(self):
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # Use slow trigger so gpt stays in REVIEWING
+        slow = SlowMockTrigger()
+        orch._create_trigger = lambda ct: slow
+
+        await orch.start(session.id)
+        await asyncio.sleep(0.05)
+
+        # Prevent auto-advance
+        original = orch._advance_to_deliberation
+        orch._advance_to_deliberation = AsyncMock()
+
+        mgr.submit_review(session.id, "opus", [
+            {"title": "Bug", "severity": "high", "file": "a.py", "description": "desc"}
+        ])
+
+        assert session.agent_states["opus"].status == AgentStatus.SUBMITTED
+        assert session.agent_states["opus"].submitted_at is not None
+        # gpt hasn't submitted yet — trigger still running
+        assert session.agent_states["gpt"].status == AgentStatus.REVIEWING
+
+        await orch.close()
+
+
+class TestAgentFailureTracking:
+    @pytest.mark.asyncio
+    async def test_agent_marked_failed_on_trigger_error(self):
+        """When a trigger returns success=False, the agent should be marked FAILED."""
+        models = [ModelConfig(id="codex", client_type="codex")]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        class FailingTrigger(TriggerEngine):
+            async def create_session(self, model_id: str) -> str:
+                return "fail-session"
+
+            async def send_prompt(self, client_session_id, model_id, prompt):
+                return TriggerResult(
+                    success=False, error="sandbox blocked", client_session_id=client_session_id
+                )
+
+            async def close(self):
+                pass
+
+        orch._create_trigger = lambda ct: FailingTrigger()
+
+        await orch.start(session.id)
+        await asyncio.sleep(0.1)
+
+        assert session.agent_states["codex"].status == AgentStatus.FAILED
+        assert session.agent_states["codex"].submitted_at is not None
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_agent_marked_failed_on_trigger_exception(self):
+        """When a trigger raises an exception, the agent should be marked FAILED."""
+        models = [ModelConfig(id="codex", client_type="codex")]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        class ExplodingTrigger(TriggerEngine):
+            async def create_session(self, model_id: str) -> str:
+                return "explode-session"
+
+            async def send_prompt(self, client_session_id, model_id, prompt):
+                raise RuntimeError("CLI not found")
+
+            async def close(self):
+                pass
+
+        orch._create_trigger = lambda ct: ExplodingTrigger()
+
+        await orch.start(session.id)
+        await asyncio.sleep(0.1)
+
+        assert session.agent_states["codex"].status == AgentStatus.FAILED
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_agent_marked_failed_when_no_review_submitted(self):
+        """When trigger succeeds but no review is submitted, agent should be marked FAILED."""
+        models = [ModelConfig(id="codex", client_type="codex")]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # MockTrigger returns success=True but never calls submit_review
+        orch._create_trigger = lambda ct: MockTrigger()
+
+        await orch.start(session.id)
+        await asyncio.sleep(0.1)
+
+        # Agent should be FAILED because trigger "succeeded" but no review was submitted
+        assert session.agent_states["codex"].status == AgentStatus.FAILED
+
+        await orch.close()
+
+
+class TestAgentTaskType:
+    @pytest.mark.asyncio
+    async def test_review_task_type_on_start(self):
+        models = [
+            ModelConfig(id="opus", client_type="claude-code", role="security"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        orch._create_trigger = lambda ct: MockTrigger()
+
+        await orch.start(session.id)
+        await asyncio.sleep(0.05)
+
+        agent = session.agent_states["opus"]
+        assert agent.task_type == AgentTaskType.REVIEW
+        assert agent.prompt_preview != ""
+        assert len(agent.prompt_preview) <= 200
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_deliberation_task_type(self):
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        mock_trigger = MockTrigger()
+        orch._triggers = {"opus": mock_trigger, "gpt": mock_trigger}
+        session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
+
+        # Initialize agent states
+        from ai_review.models import AgentState
+        session.agent_states["opus"] = AgentState(model_id="opus")
+        session.agent_states["gpt"] = AgentState(model_id="gpt")
+
+        # Submit reviews and advance
+        mgr.on_review_submitted = None
+        mgr.submit_review(session.id, "opus", [
+            {"title": "Bug", "severity": "high", "file": "a.py", "description": "desc"}
+        ])
+        mgr.submit_review(session.id, "gpt", [
+            {"title": "Perf", "severity": "medium", "file": "b.py", "description": "desc"}
+        ])
+
+        await orch._advance_to_deliberation(session.id)
+        await asyncio.sleep(0.05)
+
+        # At least one agent should be in DELIBERATION task_type
+        delib_agents = [
+            a for a in session.agent_states.values()
+            if a.task_type == AgentTaskType.DELIBERATION
+        ]
+        assert len(delib_agents) > 0
+
+        await orch.close()
