@@ -2,13 +2,13 @@
 
 import pytest
 
-from ai_review.models import DiffFile, SessionStatus, Severity
+from ai_review.models import DiffFile, ModelConfig, SessionStatus, Severity
 from ai_review.session_manager import SessionManager
 
 
 @pytest.fixture
-def manager() -> SessionManager:
-    return SessionManager()
+def manager(tmp_path) -> SessionManager:
+    return SessionManager(repo_path=str(tmp_path))
 
 
 class TestStartReview:
@@ -187,6 +187,88 @@ class TestSubmitOpinion:
         with pytest.raises(KeyError, match="Issue not found"):
             manager.submit_opinion(sid, "nonexistent", "gpt", "agree", "ok")
 
+    @pytest.mark.asyncio
+    async def test_extracts_mentions(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        session = manager.get_session(sid)
+        session.config.models = [
+            ModelConfig(id="codex"),
+            ModelConfig(id="opus"),
+        ]
+
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue_id = issues[0].id
+
+        manager.submit_opinion(sid, issue_id, "human", "clarify", "@codex 확인 부탁, @unknown 제외")
+        issue = manager.get_session(sid).issues[0]
+        assert issue.thread[-1].mentions == ["codex"]
+
+    @pytest.mark.asyncio
+    async def test_human_can_reopen_after_complete(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue = issues[0]
+        issue.consensus = True
+        issue.final_severity = Severity.HIGH
+        session = manager.get_session(sid)
+        session.status = SessionStatus.COMPLETE
+
+        result = manager.submit_opinion(sid, issue.id, "human", "clarify", "재검토 부탁")
+
+        assert result["status"] == "accepted"
+        assert session.status == SessionStatus.DELIBERATING
+        assert issue.consensus is False
+        assert issue.final_severity is None
+        assert issue.turn == 1
+
+    @pytest.mark.asyncio
+    async def test_non_human_opinion_still_blocked_in_complete(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        session = manager.get_session(sid)
+        session.status = SessionStatus.COMPLETE
+
+        with pytest.raises(ValueError, match="Cannot submit opinion"):
+            manager.submit_opinion(sid, issues[0].id, "codex1", "agree", "ok")
+
+    @pytest.mark.asyncio
+    async def test_human_assist_can_reopen_after_complete(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue = issues[0]
+        issue.consensus = True
+        issue.final_severity = Severity.HIGH
+        session = manager.get_session(sid)
+        session.status = SessionStatus.COMPLETE
+
+        result = manager.submit_opinion(sid, issue.id, "human-assist", "disagree", "근거 부족")
+
+        assert result["status"] == "accepted"
+        assert session.status == SessionStatus.DELIBERATING
+        assert issue.consensus is False
+        assert issue.final_severity is None
+        assert issue.turn == 1
+
 
 class TestGetPendingIssues:
     @pytest.mark.asyncio
@@ -220,6 +302,27 @@ class TestGetPendingIssues:
 
         pending = manager.get_pending_issues(sid, "gpt")
         assert len(pending) == 0
+
+    @pytest.mark.asyncio
+    async def test_human_comment_reopens_pending_for_all_agents(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_review(
+            sid, "codex1",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue_id = issues[0].id
+
+        # codex2 answers first turn
+        manager.submit_opinion(sid, issue_id, "codex2", "agree", "ok")
+        assert manager.get_pending_issues(sid, "codex2") == []
+
+        # human comment opens next turn
+        manager.submit_opinion(sid, issue_id, "human", "clarify", "한번 더 봐줘 @codex2")
+        pending = manager.get_pending_issues(sid, "codex2")
+        assert len(pending) == 1
 
 
 class TestSessionStatus:
@@ -293,6 +396,88 @@ class TestAddManualIssue:
         assert len(result["thread"]) == 1
         assert result["thread"][0]["action"] == "raise"
         assert result["thread"][0]["model_id"] == "human"
+
+
+class TestListSessions:
+    @pytest.mark.asyncio
+    async def test_empty(self, manager):
+        assert manager.list_sessions() == []
+
+    @pytest.mark.asyncio
+    async def test_returns_all_sessions(self, manager):
+        await manager.start_review("main")
+        await manager.start_review("develop")
+
+        sessions = manager.list_sessions()
+        assert len(sessions) == 2
+        # Sorted newest first
+        assert sessions[0]["base"] in ("main", "develop")
+
+    @pytest.mark.asyncio
+    async def test_summary_fields(self, manager):
+        await manager.start_review("main")
+        sessions = manager.list_sessions()
+        s = sessions[0]
+        assert "session_id" in s
+        assert "status" in s
+        assert "base" in s
+        assert "head" in s
+        assert "review_count" in s
+        assert "issue_count" in s
+        assert "files_changed" in s
+        assert "created_at" in s
+
+
+class TestDeleteSession:
+    @pytest.mark.asyncio
+    async def test_deletes_session(self, manager):
+        result = await manager.start_review("main")
+        sid = result["session_id"]
+
+        manager.delete_session(sid)
+        assert sid not in manager.sessions
+        assert manager.list_sessions() == []
+
+    @pytest.mark.asyncio
+    async def test_clears_current_if_deleted(self, manager):
+        result = await manager.start_review("main")
+        sid = result["session_id"]
+        assert manager.current_session is not None
+
+        manager.delete_session(sid)
+        assert manager.current_session is None
+
+    @pytest.mark.asyncio
+    async def test_delete_nonexistent_raises(self, manager):
+        with pytest.raises(KeyError, match="Session not found"):
+            manager.delete_session("nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_delete_preserves_other_sessions(self, manager):
+        r1 = await manager.start_review("main")
+        r2 = await manager.start_review("develop")
+
+        manager.delete_session(r1["session_id"])
+        assert len(manager.sessions) == 1
+        assert r2["session_id"] in manager.sessions
+
+
+class TestSetCurrentSession:
+    @pytest.mark.asyncio
+    async def test_switches_session(self, manager):
+        r1 = await manager.start_review("main")
+        r2 = await manager.start_review("develop")
+
+        # After second start, current is r2
+        assert manager.current_session.id == r2["session_id"]
+
+        manager.set_current_session(r1["session_id"])
+        assert manager.current_session.id == r1["session_id"]
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_raises(self, manager):
+        with pytest.raises(KeyError, match="Session not found"):
+            manager.set_current_session("nonexistent")
 
 
 class TestSessionNotFound:

@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from ai_review.git_diff import collect_diff, get_current_branch, get_diff_summary, parse_diff
 from ai_review.knowledge import load_config, load_knowledge
 from ai_review.models import (
+    AgentChatMessage,
+    AgentState,
+    AgentStatus,
+    AgentTaskType,
     DiffFile,
     Issue,
     Knowledge,
+    ModelConfig,
     Opinion,
     OpinionAction,
     RawIssue,
@@ -24,6 +32,8 @@ from ai_review.models import (
 from ai_review.sse import SSEBroker
 from ai_review.state import InvalidTransitionError, transition
 
+logger = logging.getLogger(__name__)
+
 
 class SessionManager:
     """Manages review sessions and orchestrates state transitions."""
@@ -33,11 +43,13 @@ class SessionManager:
         self.sessions: dict[str, ReviewSession] = {}
         self.broker = SSEBroker()
         self._current_session_id: str | None = None
+        self._state_file = self._resolve_state_file(repo_path)
 
         # Optional callbacks — set by Orchestrator to drive automation.
         # When None the manager behaves as before (manual mode).
         self.on_review_submitted: Callable[[str, str], Any] | None = None  # (session_id, model_id)
         self.on_opinion_submitted: Callable[[str, str, str], Any] | None = None  # (session_id, issue_id, model_id)
+        self._load_state()
 
     @property
     def current_session(self) -> ReviewSession | None:
@@ -50,6 +62,77 @@ class SessionManager:
         if not session:
             raise KeyError(f"Session not found: {session_id}")
         return session
+
+    def list_sessions(self) -> list[dict]:
+        """Return summary list of all sessions, sorted newest first."""
+        return [
+            {
+                "session_id": s.id,
+                "status": s.status.value,
+                "base": s.base,
+                "head": s.head,
+                "review_count": len(s.reviews),
+                "issue_count": len(s.issues),
+                "files_changed": len(s.diff),
+                "created_at": s.created_at.isoformat(),
+            }
+            for s in sorted(self.sessions.values(), key=lambda x: x.created_at, reverse=True)
+        ]
+
+    def delete_session(self, session_id: str) -> None:
+        """Delete a session. Raises KeyError if not found."""
+        if session_id not in self.sessions:
+            raise KeyError(f"Session not found: {session_id}")
+        del self.sessions[session_id]
+        if self._current_session_id == session_id:
+            self._current_session_id = None
+        self.persist()
+
+    def set_current_session(self, session_id: str) -> None:
+        """Set the active session. Raises KeyError if not found."""
+        if session_id not in self.sessions:
+            raise KeyError(f"Session not found: {session_id}")
+        self._current_session_id = session_id
+
+    @staticmethod
+    def _resolve_state_file(repo_path: str | None) -> Path:
+        root = Path(repo_path) if repo_path else Path.cwd()
+        return root / ".ai-review" / "runtime" / "sessions.json"
+
+    def _load_state(self) -> None:
+        if not self._state_file.exists():
+            return
+        try:
+            raw = json.loads(self._state_file.read_text(encoding="utf-8"))
+            sessions = raw.get("sessions", [])
+            loaded: dict[str, ReviewSession] = {}
+            for item in sessions:
+                session = ReviewSession.model_validate(item)
+                for agent in session.agent_states.values():
+                    if agent.status == AgentStatus.REVIEWING:
+                        agent.status = AgentStatus.FAILED
+                        agent.last_reason = "interrupted: server restarted"
+                        agent.updated_at = _utcnow()
+                loaded[session.id] = session
+            self.sessions = loaded
+            current = raw.get("current_session_id")
+            self._current_session_id = current if current in loaded else None
+        except Exception:
+            logger.exception("Failed to load persisted session state from %s", self._state_file)
+
+    def persist(self) -> None:
+        """Persist all sessions to disk for restart recovery."""
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "current_session_id": self._current_session_id,
+                "sessions": [s.model_dump(mode="json") for s in self.sessions.values()],
+            }
+            temp = self._state_file.with_suffix(".tmp")
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.replace(self._state_file)
+        except Exception:
+            logger.exception("Failed to persist session state to %s", self._state_file)
 
     async def start_review(self, base: str = "main") -> dict:
         """Start a new review session: collect diff and knowledge."""
@@ -80,6 +163,7 @@ class SessionManager:
         summary = get_diff_summary(session.diff)
         summary["session_id"] = session.id
         summary["head"] = session.head
+        self.persist()
         return summary
 
     def get_review_context(self, session_id: str, file: str | None = None) -> dict:
@@ -188,6 +272,7 @@ class SessionManager:
         if self.on_review_submitted is not None:
             self.on_review_submitted(session_id, model_id)
 
+        self.persist()
         return result
 
     def get_all_reviews(self, session_id: str) -> list[dict]:
@@ -216,12 +301,14 @@ class SessionManager:
                             action=OpinionAction.RAISE,
                             reasoning=raw.description,
                             suggested_severity=raw.severity,
+                            turn=0,
                         )
                     ],
                 )
                 issues.append(issue)
 
         session.issues = issues
+        self.persist()
         return issues
 
     def get_issues(self, session_id: str) -> list[dict]:
@@ -245,21 +332,41 @@ class SessionManager:
         action: str,
         reasoning: str,
         suggested_severity: str | None = None,
+        mentions: list[str] | None = None,
     ) -> dict:
         """Submit an opinion on an issue."""
         session = self.get_session(session_id)
+        human_like_models = {"human", "human-assist"}
+        is_human_like = model_id in human_like_models
 
-        if session.status not in (SessionStatus.DELIBERATING, SessionStatus.REVIEWING):
+        is_human_reopen = is_human_like and session.status == SessionStatus.COMPLETE
+        if session.status not in (SessionStatus.DELIBERATING, SessionStatus.REVIEWING) and not is_human_reopen:
             raise ValueError(f"Cannot submit opinion in {session.status.value} state")
 
         for issue in session.issues:
             if issue.id == issue_id:
+                # Human 의견은 새 턴을 열고 이슈를 재오픈해 모든 에이전트가 다시 검토하도록 유도
+                if is_human_like:
+                    issue.turn += 1
+                    issue.consensus = False
+                    issue.final_severity = None
+                target_turn = issue.turn
+
+                # Reject duplicate opinion from same model in same turn
+                if not is_human_like and any(
+                    op.model_id == model_id and op.turn == target_turn
+                    for op in issue.thread
+                ):
+                    return {"status": "duplicate", "thread_length": len(issue.thread), "turn": target_turn}
+
                 sev = Severity(suggested_severity) if suggested_severity else None
                 opinion = Opinion(
                     model_id=model_id,
                     action=OpinionAction(action),
                     reasoning=reasoning,
                     suggested_severity=sev,
+                    turn=target_turn,
+                    mentions=sorted(set((mentions or []) + self._extract_mentions(reasoning, session))),
                 )
                 issue.thread.append(opinion)
 
@@ -270,27 +377,39 @@ class SessionManager:
                         "issue_id": issue_id,
                         "model_id": model_id,
                         "action": action,
+                        "turn": target_turn,
                     },
                 )
 
-                result = {"status": "accepted", "thread_length": len(issue.thread)}
+                result = {"status": "accepted", "thread_length": len(issue.thread), "turn": target_turn}
+
+                if is_human_reopen:
+                    session.status = SessionStatus.DELIBERATING
+                    self.broker.publish(
+                        "phase_change",
+                        {"status": "deliberating", "session_id": session_id},
+                    )
 
                 if self.on_opinion_submitted is not None:
                     self.on_opinion_submitted(session_id, issue_id, model_id)
 
+                self.persist()
                 return result
 
         raise KeyError(f"Issue not found: {issue_id}")
 
     def get_pending_issues(self, session_id: str, model_id: str) -> list[dict]:
-        """Get issues where the model hasn't participated yet (neither raised nor opined)."""
+        """Get issues where the model hasn't responded for the current issue turn."""
         session = self.get_session(session_id)
         pending = []
         for issue in session.issues:
-            model_participated = any(
-                op.model_id == model_id for op in issue.thread
+            if issue.consensus:
+                continue
+            latest_model_turn = max(
+                (op.turn for op in issue.thread if op.model_id == model_id),
+                default=-1,
             )
-            if not model_participated:
+            if latest_model_turn < issue.turn:
                 pending.append(issue.model_dump(mode="json"))
         return pending
 
@@ -315,6 +434,15 @@ class SessionManager:
     def _get_agent_statuses(self, session: ReviewSession) -> list[dict]:
         """Build agent status list for the UI."""
         result = []
+        # Include configured models even if not yet triggered.
+        for mc in session.config.models:
+            if mc.id not in session.agent_states:
+                session.agent_states[mc.id] = AgentState(
+                    model_id=mc.id,
+                    status=AgentStatus.WAITING,
+                    task_type=AgentTaskType.REVIEW,
+                )
+
         for model_id, agent in session.agent_states.items():
             elapsed = None
             if agent.started_at:
@@ -326,11 +454,109 @@ class SessionManager:
                 "task_type": agent.task_type.value,
                 "prompt_preview": agent.prompt_preview,
                 "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
+                "last_reason": agent.last_reason,
                 "role": next(
                     (m.role for m in session.config.models if m.id == model_id), ""
                 ),
             })
         return result
+
+    def update_agent_runtime(
+        self,
+        session_id: str,
+        model_id: str,
+        *,
+        reason: str | None = None,
+        output: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Update runtime telemetry for one agent."""
+        session = self.get_session(session_id)
+        agent = session.agent_states.get(model_id)
+        if not agent:
+            return
+        if reason is not None:
+            agent.last_reason = reason
+        if output is not None:
+            agent.last_output = output
+        if error is not None:
+            agent.last_error = error
+        agent.updated_at = _utcnow()
+        self.persist()
+
+    def get_agent_runtime(self, session_id: str, model_id: str) -> dict:
+        """Get current runtime information for one agent."""
+        session = self.get_session(session_id)
+        agent = session.agent_states.get(model_id)
+        if not agent:
+            raise KeyError(f"Agent not found: {model_id}")
+
+        elapsed = None
+        if agent.started_at:
+            end = agent.submitted_at or _utcnow()
+            elapsed = round((end - agent.started_at).total_seconds(), 1)
+
+        pending = self.get_pending_issues(session_id, model_id)
+        return {
+            "model_id": model_id,
+            "status": agent.status.value,
+            "task_type": agent.task_type.value,
+            "role": next((m.role for m in session.config.models if m.id == model_id), ""),
+            "prompt_preview": agent.prompt_preview,
+            "prompt_full": agent.prompt_full,
+            "started_at": agent.started_at.isoformat() if agent.started_at else None,
+            "submitted_at": agent.submitted_at.isoformat() if agent.submitted_at else None,
+            "elapsed_seconds": elapsed,
+            "last_reason": agent.last_reason,
+            "last_output": agent.last_output,
+            "last_error": agent.last_error,
+            "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
+            "pending_count": len(pending),
+            "pending_issue_ids": [p["id"] for p in pending],
+        }
+
+    def list_agents(self, session_id: str) -> list[dict]:
+        """List configured agents for a session."""
+        session = self.get_session(session_id)
+        return [m.model_dump(mode="json") for m in session.config.models]
+
+    def add_agent(self, session_id: str, model: dict) -> dict:
+        """Add a model config to the session."""
+        session = self.get_session(session_id)
+        mc = ModelConfig(**model)
+        if any(m.id == mc.id for m in session.config.models):
+            raise ValueError(f"Agent already exists: {mc.id}")
+        session.config.models.append(mc)
+        self.persist()
+        return mc.model_dump(mode="json")
+
+    def remove_agent(self, session_id: str, model_id: str) -> dict:
+        """Remove a model config from the session."""
+        session = self.get_session(session_id)
+        before = len(session.config.models)
+        session.config.models = [m for m in session.config.models if m.id != model_id]
+        if len(session.config.models) == before:
+            raise KeyError(f"Agent not found: {model_id}")
+        session.agent_states.pop(model_id, None)
+        session.client_sessions.pop(model_id, None)
+        session.agent_chats.pop(model_id, None)
+        self.persist()
+        return {"status": "removed", "model_id": model_id}
+
+    def get_agent_chat(self, session_id: str, model_id: str) -> list[dict]:
+        """Get direct chat history with an agent."""
+        session = self.get_session(session_id)
+        return [m.model_dump(mode="json") for m in session.agent_chats.get(model_id, [])]
+
+    def append_agent_chat(
+        self, session_id: str, model_id: str, role: str, content: str
+    ) -> None:
+        """Append direct chat message for an agent."""
+        session = self.get_session(session_id)
+        session.agent_chats.setdefault(model_id, []).append(
+            AgentChatMessage(role=role, content=content)
+        )
+        self.persist()
 
     def add_manual_issue(
         self,
@@ -369,6 +595,7 @@ class SessionManager:
             "issue_created",
             {"session_id": session_id, "issue_id": issue.id, "title": title},
         )
+        self.persist()
         return issue.model_dump(mode="json")
 
     def get_final_report(self, session_id: str) -> dict:
@@ -405,3 +632,11 @@ class SessionManager:
                 "dismissed": dismissed_count,
             },
         }
+
+    def _extract_mentions(self, text: str, session: ReviewSession) -> list[str]:
+        """Extract @model mentions from free-form text."""
+        if not text:
+            return []
+        mentioned = re.findall(r"@([A-Za-z0-9_-]+)", text)
+        valid_ids = {m.id for m in session.config.models}
+        return [m for m in mentioned if m in valid_ids]
