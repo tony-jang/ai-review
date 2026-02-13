@@ -30,8 +30,10 @@ class Orchestrator:
     def __init__(self, manager: SessionManager, api_base_url: str) -> None:
         self.manager = manager
         self.api_base_url = api_base_url
-        self._triggers: dict[str, TriggerEngine] = {}  # model_id -> engine
-        self._pending_tasks: list[asyncio.Task] = []
+        # Session-scoped: session_id -> model_id -> engine
+        self._triggers: dict[str, dict[str, TriggerEngine]] = {}
+        # Session-scoped: session_id -> list of tasks
+        self._pending_tasks: dict[str, list[asyncio.Task]] = {}
 
         # Register callbacks on the manager
         manager.on_review_submitted = self._on_review_submitted
@@ -54,14 +56,17 @@ class Orchestrator:
             logger.info("No enabled models — staying in manual mode")
             return
 
+        session_triggers = self._triggers.setdefault(session_id, {})
+        session_tasks = self._pending_tasks.setdefault(session_id, [])
+
         for mc in enabled_models:
             trigger = self._create_trigger(mc.client_type)
-            self._triggers[mc.id] = trigger
+            session_triggers[mc.id] = trigger
             session.agent_states[mc.id] = AgentState(model_id=mc.id)
 
         # Fire-and-forget review prompts for each model
         for mc in enabled_models:
-            trigger = self._triggers[mc.id]
+            trigger = session_triggers[mc.id]
             client_sid = await trigger.create_session(mc.id)
             session.client_sessions[mc.id] = client_sid
 
@@ -96,10 +101,10 @@ class Orchestrator:
             )
 
             task = asyncio.create_task(
-                self._fire_trigger(trigger, client_sid, mc.id, prompt),
-                name=f"review-{mc.id}",
+                self._fire_trigger(session_id, trigger, client_sid, mc.id, prompt),
+                name=f"review-{session_id[:8]}-{mc.id}",
             )
-            self._pending_tasks.append(task)
+            session_tasks.append(task)
 
         logger.info("Triggered %d models for review", len(enabled_models))
         self.manager.persist()
@@ -114,19 +119,48 @@ class Orchestrator:
                     agent.last_reason = "cancelled: server shutdown"
                     agent.updated_at = _utcnow()
 
-        for task in self._pending_tasks:
+        all_tasks: list[asyncio.Task] = []
+        for tasks in self._pending_tasks.values():
+            all_tasks.extend(tasks)
+        for task in all_tasks:
             task.cancel()
-        if self._pending_tasks:
-            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+        if all_tasks:
+            await asyncio.gather(*all_tasks, return_exceptions=True)
         self._pending_tasks.clear()
 
-        for trigger in self._triggers.values():
+        all_triggers: list[TriggerEngine] = []
+        for triggers in self._triggers.values():
+            all_triggers.extend(triggers.values())
+        for trigger in all_triggers:
             await trigger.close()
         self._triggers.clear()
 
         # Detach callbacks
         self.manager.on_review_submitted = None
         self.manager.on_opinion_submitted = None
+        self.manager.persist()
+
+    async def stop_session(self, session_id: str) -> None:
+        """Cancel pending tasks and close triggers for a single session."""
+        session = self.manager.sessions.get(session_id)
+        if session:
+            for agent in session.agent_states.values():
+                if agent.status == AgentStatus.REVIEWING:
+                    agent.status = AgentStatus.FAILED
+                    agent.submitted_at = _utcnow()
+                    agent.last_reason = "cancelled: session stopped"
+                    agent.updated_at = _utcnow()
+
+        tasks = self._pending_tasks.pop(session_id, [])
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        triggers = self._triggers.pop(session_id, {})
+        for trigger in triggers.values():
+            await trigger.close()
+
         self.manager.persist()
 
     async def add_agent(self, session_id: str, model_id: str) -> None:
@@ -138,11 +172,13 @@ class Orchestrator:
         if not mc.enabled:
             logger.info("Agent %s is disabled — skipping", model_id)
             return
-        if model_id in self._triggers:
+
+        session_triggers = self._triggers.setdefault(session_id, {})
+        if model_id in session_triggers:
             return
 
         trigger = self._create_trigger(mc.client_type)
-        self._triggers[model_id] = trigger
+        session_triggers[model_id] = trigger
         session.agent_states[model_id] = AgentState(model_id=model_id)
         client_sid = await trigger.create_session(model_id)
         session.client_sessions[model_id] = client_sid
@@ -190,16 +226,18 @@ class Orchestrator:
                 "prompt_preview": prompt[:200],
             },
         )
+        session_tasks = self._pending_tasks.setdefault(session_id, [])
         task = asyncio.create_task(
-            self._fire_trigger(trigger, client_sid, model_id, prompt),
-            name=f"dynamic-{model_id}",
+            self._fire_trigger(session_id, trigger, client_sid, model_id, prompt),
+            name=f"dynamic-{session_id[:8]}-{model_id}",
         )
-        self._pending_tasks.append(task)
+        session_tasks.append(task)
         self.manager.persist()
 
     async def remove_agent(self, session_id: str, model_id: str) -> None:
         """Dynamically remove an agent from orchestration."""
-        trigger = self._triggers.pop(model_id, None)
+        session_triggers = self._triggers.get(session_id, {})
+        trigger = session_triggers.pop(model_id, None)
         if trigger is not None:
             await trigger.close()
         self.manager.get_session(session_id).agent_states.pop(model_id, None)
@@ -213,10 +251,12 @@ class Orchestrator:
         mc = next((m for m in session.config.models if m.id == model_id), None)
         if mc is None:
             raise KeyError(f"Agent not configured: {model_id}")
-        trigger = self._triggers.get(model_id)
+
+        session_triggers = self._triggers.setdefault(session_id, {})
+        trigger = session_triggers.get(model_id)
         if trigger is None:
             trigger = self._create_trigger(mc.client_type)
-            self._triggers[model_id] = trigger
+            session_triggers[model_id] = trigger
 
         client_sid = session.client_sessions.get(model_id)
         if not client_sid:
@@ -357,7 +397,8 @@ class Orchestrator:
                     },
                 )
 
-            trigger = self._triggers.get(mc.id)
+            session_triggers = self._triggers.get(session_id, {})
+            trigger = session_triggers.get(mc.id)
             if not trigger:
                 continue
 
@@ -366,11 +407,12 @@ class Orchestrator:
                 client_sid = await trigger.create_session(mc.id)
                 session.client_sessions[mc.id] = client_sid
 
+            session_tasks = self._pending_tasks.setdefault(session_id, [])
             task = asyncio.create_task(
-                self._fire_trigger(trigger, client_sid, mc.id, prompt),
-                name=f"deliberate-{mc.id}",
+                self._fire_trigger(session_id, trigger, client_sid, mc.id, prompt),
+                name=f"deliberate-{session_id[:8]}-{mc.id}",
             )
-            self._pending_tasks.append(task)
+            session_tasks.append(task)
         self.manager.persist()
 
     async def _check_and_advance(self, session_id: str) -> None:
@@ -446,10 +488,9 @@ class Orchestrator:
         return ClaudeCodeTrigger()
 
     async def _fire_trigger(
-        self, trigger: TriggerEngine, client_session_id: str, model_id: str, prompt: str
+        self, session_id: str, trigger: TriggerEngine, client_session_id: str, model_id: str, prompt: str
     ) -> None:
         """Fire a trigger and log the result (fire-and-forget wrapper)."""
-        session_id = self._session_id_for_model(model_id)
         try:
             result = await trigger.send_prompt(client_session_id, model_id, prompt)
             if session_id:
@@ -488,22 +529,6 @@ class Orchestrator:
                 else:
                     logger.warning("Trigger %s completed but no review submitted", model_id)
                     self._mark_agent_failed(session_id, model_id, "completed without submitting review")
-
-    def _session_id_for_model(self, model_id: str) -> str | None:
-        """Find the session ID that contains this model's agent state."""
-        current = self.manager.current_session
-        if current and model_id in current.agent_states:
-            return current.id
-
-        candidates = sorted(
-            self.manager.sessions.values(),
-            key=lambda s: s.created_at,
-            reverse=True,
-        )
-        for session in candidates:
-            if model_id in session.agent_states:
-                return session.id
-        return None
 
     def _mark_agent_failed(self, session_id: str | None, model_id: str, reason: str) -> None:
         """Mark an agent as failed and publish the event."""

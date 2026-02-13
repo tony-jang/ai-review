@@ -15,7 +15,6 @@ from ai_review.models import (
     ReviewSession,
     SessionConfig,
     SessionStatus,
-    Severity,
 )
 from ai_review.orchestrator import Orchestrator
 from ai_review.session_manager import SessionManager
@@ -78,18 +77,17 @@ class TestOrchestratorStart:
         # Replace triggers with mocks
         mock_a = MockTrigger()
         mock_b = MockTrigger()
-        orch._triggers = {}
 
         # Patch _create_trigger to return mocks
         triggers_map = {"opus": mock_a, "gpt": mock_b}
         orch._create_trigger = lambda ct: triggers_map.get(ct, MockTrigger())
 
-        # Manually set triggers since start() creates them
-        orch._triggers = triggers_map
+        # Manually set triggers since start() creates them (session-scoped)
+        orch._triggers[session.id] = triggers_map
 
         # Simulate start by creating sessions and firing
         for mc in models:
-            trigger = orch._triggers[mc.id]
+            trigger = orch._triggers[session.id][mc.id]
             client_sid = await trigger.create_session(mc.id)
             session.client_sessions[mc.id] = client_sid
 
@@ -239,9 +237,9 @@ class TestAdvanceToDeliberation:
         mgr, session = _make_manager_with_config(models)
         orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
-        # Set up mock triggers
+        # Set up mock triggers (session-scoped)
         mock_trigger = MockTrigger()
-        orch._triggers = {"opus": mock_trigger, "gpt": mock_trigger}
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger}
         session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
 
         # Submit reviews
@@ -297,9 +295,9 @@ class TestFullCycleWithMocks:
         mgr, session = _make_manager_with_config(models)
         orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
-        # Replace trigger creation with mocks
+        # Replace trigger creation with mocks (session-scoped)
         mock_trigger = MockTrigger()
-        orch._triggers = {"opus": mock_trigger, "gpt": mock_trigger}
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger}
         session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
 
         # Disable auto-advance for manual control
@@ -501,7 +499,7 @@ class TestAgentFailureTracking:
         )
         orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
-        await orch._fire_trigger(MockTrigger(), "mock-codex", "codex", "deliberate")
+        await orch._fire_trigger(session.id, MockTrigger(), "mock-codex", "codex", "deliberate")
         assert session.agent_states["codex"].status == AgentStatus.WAITING
 
         await orch.close()
@@ -525,8 +523,9 @@ class TestDisabledAgentSkip:
 
         assert "opus" in session.agent_states
         assert "gpt" not in session.agent_states
-        assert "opus" in orch._triggers
-        assert "gpt" not in orch._triggers
+        session_triggers = orch._triggers.get(session.id, {})
+        assert "opus" in session_triggers
+        assert "gpt" not in session_triggers
 
         await orch.close()
 
@@ -542,7 +541,8 @@ class TestDisabledAgentSkip:
 
         await orch.start(session.id)
 
-        assert len(orch._triggers) == 0
+        session_triggers = orch._triggers.get(session.id, {})
+        assert len(session_triggers) == 0
         assert len(session.agent_states) == 0
 
         await orch.close()
@@ -560,7 +560,8 @@ class TestDisabledAgentSkip:
         await orch.add_agent(session.id, "gpt")
 
         assert "gpt" not in session.agent_states
-        assert "gpt" not in orch._triggers
+        session_triggers = orch._triggers.get(session.id, {})
+        assert "gpt" not in session_triggers
 
         await orch.close()
 
@@ -596,7 +597,7 @@ class TestAgentTaskType:
         orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         mock_trigger = MockTrigger()
-        orch._triggers = {"opus": mock_trigger, "gpt": mock_trigger}
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger}
         session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
 
         # Initialize agent states
@@ -622,5 +623,90 @@ class TestAgentTaskType:
             if a.task_type == AgentTaskType.DELIBERATION
         ]
         assert len(delib_agents) > 0
+
+        await orch.close()
+
+
+class TestSessionIsolation:
+    """Two concurrent sessions with the same model_id must not interfere."""
+
+    @pytest.mark.asyncio
+    async def test_two_sessions_same_model_id(self):
+        models = [ModelConfig(id="opus", client_type="claude-code", role="security")]
+        mgr = SessionManager(repo_path=None)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # Create two sessions with the same model config
+        s1 = ReviewSession(
+            status=SessionStatus.REVIEWING,
+            config=SessionConfig(models=models, max_turns=3, consensus_threshold=2),
+        )
+        s2 = ReviewSession(
+            status=SessionStatus.REVIEWING,
+            config=SessionConfig(models=models, max_turns=3, consensus_threshold=2),
+        )
+        mgr.sessions[s1.id] = s1
+        mgr.sessions[s2.id] = s2
+
+        slow = SlowMockTrigger()
+        orch._create_trigger = lambda ct: slow
+
+        await orch.start(s1.id)
+        await orch.start(s2.id)
+        await asyncio.sleep(0.05)
+
+        # Each session has its own trigger entry
+        assert s1.id in orch._triggers
+        assert s2.id in orch._triggers
+        assert "opus" in orch._triggers[s1.id]
+        assert "opus" in orch._triggers[s2.id]
+
+        # Each session has its own pending tasks
+        assert len(orch._pending_tasks.get(s1.id, [])) == 1
+        assert len(orch._pending_tasks.get(s2.id, [])) == 1
+
+        # Both sessions have independent agent states
+        assert s1.agent_states["opus"].status == AgentStatus.REVIEWING
+        assert s2.agent_states["opus"].status == AgentStatus.REVIEWING
+
+        # Stopping one session should not affect the other
+        await orch.stop_session(s1.id)
+        assert s1.id not in orch._triggers
+        assert s2.id in orch._triggers
+        assert s1.agent_states["opus"].status == AgentStatus.FAILED
+        assert s2.agent_states["opus"].status == AgentStatus.REVIEWING
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_stop_session_cancels_only_that_session(self):
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr = SessionManager(repo_path=None)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        s1 = ReviewSession(
+            status=SessionStatus.REVIEWING,
+            config=SessionConfig(models=models, max_turns=3, consensus_threshold=2),
+        )
+        mgr.sessions[s1.id] = s1
+
+        slow = SlowMockTrigger()
+        orch._create_trigger = lambda ct: slow
+
+        await orch.start(s1.id)
+        await asyncio.sleep(0.05)
+
+        assert len(orch._pending_tasks.get(s1.id, [])) == 2
+
+        await orch.stop_session(s1.id)
+
+        assert s1.id not in orch._pending_tasks
+        assert s1.id not in orch._triggers
+        # All agents marked failed
+        for agent in s1.agent_states.values():
+            assert agent.status == AgentStatus.FAILED
 
         await orch.close()
