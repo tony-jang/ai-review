@@ -14,12 +14,14 @@ from ai_review.state import can_transition, transition
 from ai_review.trigger.base import TriggerEngine
 from ai_review.trigger.cc import ClaudeCodeTrigger
 from ai_review.trigger.codex import CodexTrigger
+from ai_review.trigger.gemini import GeminiTrigger
 from ai_review.trigger.opencode import OpenCodeTrigger
 
 if TYPE_CHECKING:
     from ai_review.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
+MAX_RUNTIME_TEXT = 12000
 
 
 class Orchestrator:
@@ -47,21 +49,25 @@ class Orchestrator:
             return
 
         # Create triggers per model and initialize agent states
-        for mc in config.models:
+        enabled_models = [mc for mc in config.models if mc.enabled]
+        if not enabled_models:
+            logger.info("No enabled models — staying in manual mode")
+            return
+
+        for mc in enabled_models:
             trigger = self._create_trigger(mc.client_type)
             self._triggers[mc.id] = trigger
             session.agent_states[mc.id] = AgentState(model_id=mc.id)
 
         # Fire-and-forget review prompts for each model
-        for mc in config.models:
+        for mc in enabled_models:
             trigger = self._triggers[mc.id]
             client_sid = await trigger.create_session(mc.id)
             session.client_sessions[mc.id] = client_sid
 
             prompt = build_review_prompt(
                 session_id=session_id,
-                model_id=mc.id,
-                role=mc.role,
+                model_config=mc,
                 api_base_url=self.api_base_url,
             )
 
@@ -69,7 +75,15 @@ class Orchestrator:
             session.agent_states[mc.id].status = AgentStatus.REVIEWING
             session.agent_states[mc.id].task_type = AgentTaskType.REVIEW
             session.agent_states[mc.id].prompt_preview = prompt[:200]
+            session.agent_states[mc.id].prompt_full = prompt
             session.agent_states[mc.id].started_at = _utcnow()
+            self.manager.update_agent_runtime(
+                session_id,
+                mc.id,
+                reason="review trigger started",
+                output="",
+                error="",
+            )
             self.manager.broker.publish(
                 "agent_status",
                 {
@@ -87,12 +101,23 @@ class Orchestrator:
             )
             self._pending_tasks.append(task)
 
-        logger.info("Triggered %d models for review", len(config.models))
+        logger.info("Triggered %d models for review", len(enabled_models))
+        self.manager.persist()
 
     async def close(self) -> None:
         """Cancel pending tasks and close all triggers."""
+        for session in self.manager.sessions.values():
+            for agent in session.agent_states.values():
+                if agent.status == AgentStatus.REVIEWING:
+                    agent.status = AgentStatus.FAILED
+                    agent.submitted_at = _utcnow()
+                    agent.last_reason = "cancelled: server shutdown"
+                    agent.updated_at = _utcnow()
+
         for task in self._pending_tasks:
             task.cancel()
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
         self._pending_tasks.clear()
 
         for trigger in self._triggers.values():
@@ -102,6 +127,106 @@ class Orchestrator:
         # Detach callbacks
         self.manager.on_review_submitted = None
         self.manager.on_opinion_submitted = None
+        self.manager.persist()
+
+    async def add_agent(self, session_id: str, model_id: str) -> None:
+        """Dynamically add an agent and trigger the current phase task."""
+        session = self.manager.get_session(session_id)
+        mc = next((m for m in session.config.models if m.id == model_id), None)
+        if mc is None:
+            raise KeyError(f"Agent config not found: {model_id}")
+        if not mc.enabled:
+            logger.info("Agent %s is disabled — skipping", model_id)
+            return
+        if model_id in self._triggers:
+            return
+
+        trigger = self._create_trigger(mc.client_type)
+        self._triggers[model_id] = trigger
+        session.agent_states[model_id] = AgentState(model_id=model_id)
+        client_sid = await trigger.create_session(model_id)
+        session.client_sessions[model_id] = client_sid
+
+        if session.status == SessionStatus.DELIBERATING:
+            pending = self.manager.get_pending_issues(session_id, model_id)
+            if not pending:
+                session.agent_states[model_id].status = AgentStatus.SUBMITTED
+                session.agent_states[model_id].submitted_at = _utcnow()
+                return
+            issue_ids = [p["id"] for p in pending]
+            prompt = build_deliberation_prompt(
+                session_id=session_id,
+                model_config=mc,
+                issue_ids=issue_ids,
+                api_base_url=self.api_base_url,
+            )
+            session.agent_states[model_id].task_type = AgentTaskType.DELIBERATION
+        else:
+            prompt = build_review_prompt(
+                session_id=session_id,
+                model_config=mc,
+                api_base_url=self.api_base_url,
+            )
+            session.agent_states[model_id].task_type = AgentTaskType.REVIEW
+
+        session.agent_states[model_id].status = AgentStatus.REVIEWING
+        session.agent_states[model_id].prompt_preview = prompt[:200]
+        session.agent_states[model_id].prompt_full = prompt
+        session.agent_states[model_id].started_at = _utcnow()
+        self.manager.update_agent_runtime(
+            session_id,
+            model_id,
+            reason=f"{session.agent_states[model_id].task_type.value} trigger started",
+            output="",
+            error="",
+        )
+        self.manager.broker.publish(
+            "agent_status",
+            {
+                "session_id": session_id,
+                "model_id": model_id,
+                "status": "reviewing",
+                "task_type": session.agent_states[model_id].task_type.value,
+                "prompt_preview": prompt[:200],
+            },
+        )
+        task = asyncio.create_task(
+            self._fire_trigger(trigger, client_sid, model_id, prompt),
+            name=f"dynamic-{model_id}",
+        )
+        self._pending_tasks.append(task)
+        self.manager.persist()
+
+    async def remove_agent(self, session_id: str, model_id: str) -> None:
+        """Dynamically remove an agent from orchestration."""
+        trigger = self._triggers.pop(model_id, None)
+        if trigger is not None:
+            await trigger.close()
+        self.manager.get_session(session_id).agent_states.pop(model_id, None)
+        self.manager.get_session(session_id).client_sessions.pop(model_id, None)
+        self._maybe_advance(session_id)
+        self.manager.persist()
+
+    async def chat_with_agent(self, session_id: str, model_id: str, message: str) -> str:
+        """Directly send a user message to a specific agent."""
+        session = self.manager.get_session(session_id)
+        mc = next((m for m in session.config.models if m.id == model_id), None)
+        if mc is None:
+            raise KeyError(f"Agent not configured: {model_id}")
+        trigger = self._triggers.get(model_id)
+        if trigger is None:
+            trigger = self._create_trigger(mc.client_type)
+            self._triggers[model_id] = trigger
+
+        client_sid = session.client_sessions.get(model_id)
+        if not client_sid:
+            client_sid = await trigger.create_session(model_id)
+            session.client_sessions[model_id] = client_sid
+
+        result = await trigger.send_prompt(client_sid, model_id, message)
+        if not result.success:
+            raise ValueError(result.error or "agent chat failed")
+        return result.output or "(empty response)"
 
     # --- Callbacks ---
 
@@ -113,23 +238,26 @@ class Orchestrator:
         if model_id in session.agent_states:
             session.agent_states[model_id].status = AgentStatus.SUBMITTED
             session.agent_states[model_id].submitted_at = _utcnow()
+            self.manager.update_agent_runtime(session_id, model_id, reason="review submitted")
             self.manager.broker.publish(
                 "agent_status",
                 {"session_id": session_id, "model_id": model_id, "status": "submitted"},
             )
 
         self._maybe_advance(session_id)
+        self.manager.persist()
 
     def _maybe_advance(self, session_id: str) -> None:
         """Advance to deliberation if all agents are done (submitted or failed) and at least one review exists."""
         session = self.manager.get_session(session_id)
-        expected = len(session.config.models)
+        enabled_ids = {m.id for m in session.config.models if m.enabled}
+        expected = len(enabled_ids)
         if expected == 0:
             return
 
         finished = sum(
-            1 for a in session.agent_states.values()
-            if a.status in (AgentStatus.SUBMITTED, AgentStatus.FAILED)
+            1 for mid, a in session.agent_states.items()
+            if mid in enabled_ids and a.status in (AgentStatus.SUBMITTED, AgentStatus.FAILED)
         )
         if finished >= expected and len(session.reviews) > 0:
             logger.info("All %d agents finished (%d reviews) — advancing", expected, len(session.reviews))
@@ -137,6 +265,12 @@ class Orchestrator:
 
     def _on_opinion_submitted(self, session_id: str, issue_id: str, model_id: str) -> None:
         """Called after each opinion. Re-checks consensus and triggers next round or finishes."""
+        human_like = {"human", "human-assist"}
+        if model_id not in human_like:
+            self.manager.update_agent_runtime(session_id, model_id, reason=f"opinion submitted for {issue_id}")
+        if model_id in human_like:
+            # Human comment opens a new turn on the issue. Re-trigger pending agents immediately.
+            asyncio.ensure_future(self._trigger_deliberation_round(session_id))
         asyncio.ensure_future(self._check_and_advance(session_id))
 
     # --- Internal flow ---
@@ -172,13 +306,19 @@ class Orchestrator:
                 "phase_change", {"status": "deliberating", "session_id": session_id}
             )
 
+        self.manager.persist()
         await self._trigger_deliberation_round(session_id)
 
     async def _trigger_deliberation_round(self, session_id: str) -> None:
         """Send deliberation prompts to each model for their pending issues."""
         session = self.manager.get_session(session_id)
 
-        for mc in session.config.models:
+        for mc in (m for m in session.config.models if m.enabled):
+            agent = session.agent_states.get(mc.id)
+            # Skip if deliberation is already running or was just triggered (WAITING after deliberation)
+            if agent and agent.task_type == AgentTaskType.DELIBERATION:
+                if agent.status in (AgentStatus.REVIEWING, AgentStatus.WAITING):
+                    continue
             pending = self.manager.get_pending_issues(session_id, mc.id)
             if not pending:
                 continue
@@ -186,7 +326,7 @@ class Orchestrator:
             issue_ids = [p["id"] for p in pending]
             prompt = build_deliberation_prompt(
                 session_id=session_id,
-                model_id=mc.id,
+                model_config=mc,
                 issue_ids=issue_ids,
                 api_base_url=self.api_base_url,
             )
@@ -198,6 +338,14 @@ class Orchestrator:
                 session.agent_states[mc.id].started_at = _utcnow()
                 session.agent_states[mc.id].submitted_at = None
                 session.agent_states[mc.id].prompt_preview = prompt[:200]
+                session.agent_states[mc.id].prompt_full = prompt
+                self.manager.update_agent_runtime(
+                    session_id,
+                    mc.id,
+                    reason="deliberation trigger started",
+                    output="",
+                    error="",
+                )
                 self.manager.broker.publish(
                     "agent_status",
                     {
@@ -223,6 +371,7 @@ class Orchestrator:
                 name=f"deliberate-{mc.id}",
             )
             self._pending_tasks.append(task)
+        self.manager.persist()
 
     async def _check_and_advance(self, session_id: str) -> None:
         """Re-apply consensus. If all resolved or max turns, finish. Else next round."""
@@ -240,7 +389,7 @@ class Orchestrator:
 
         # Check if all models have responded in this round
         all_responded = True
-        for mc in session.config.models:
+        for mc in (m for m in session.config.models if m.enabled):
             pending = self.manager.get_pending_issues(session_id, mc.id)
             if pending:
                 all_responded = False
@@ -262,6 +411,11 @@ class Orchestrator:
                 await self._finish(session_id)
             else:
                 await self._trigger_deliberation_round(session_id)
+            return
+
+        # Not all responded yet. Ensure non-busy pending agents are triggered.
+        await self._trigger_deliberation_round(session_id)
+        self.manager.persist()
 
     async def _finish(self, session_id: str) -> None:
         """Transition to COMPLETE and clean up triggers."""
@@ -277,6 +431,7 @@ class Orchestrator:
             )
 
         logger.info("Session %s complete", session_id)
+        self.manager.persist()
 
     # --- Helpers ---
 
@@ -286,6 +441,8 @@ class Orchestrator:
             return OpenCodeTrigger()
         if client_type == "codex":
             return CodexTrigger()
+        if client_type == "gemini":
+            return GeminiTrigger()
         return ClaudeCodeTrigger()
 
     async def _fire_trigger(
@@ -295,8 +452,17 @@ class Orchestrator:
         session_id = self._session_id_for_model(model_id)
         try:
             result = await trigger.send_prompt(client_session_id, model_id, prompt)
+            if session_id:
+                self.manager.update_agent_runtime(
+                    session_id,
+                    model_id,
+                    output=self._clip_runtime_text(result.output),
+                    error=self._clip_runtime_text(result.error),
+                )
             if result.success:
                 logger.info("Trigger %s succeeded", model_id)
+                if session_id:
+                    self.manager.update_agent_runtime(session_id, model_id, reason="trigger completed")
             else:
                 logger.warning("Trigger %s failed: %s", model_id, result.error)
                 self._mark_agent_failed(session_id, model_id, result.error or "trigger failed")
@@ -316,14 +482,27 @@ class Orchestrator:
             session = self.manager.get_session(session_id)
             agent = session.agent_states.get(model_id)
             if agent and agent.status == AgentStatus.REVIEWING:
-                logger.warning("Trigger %s completed but no review submitted", model_id)
-                self._mark_agent_failed(session_id, model_id, "completed without submitting review")
+                if agent.task_type == AgentTaskType.DELIBERATION:
+                    logger.info("Trigger %s completed without opinion — set waiting", model_id)
+                    self._mark_agent_waiting(session_id, model_id, "deliberation pending")
+                else:
+                    logger.warning("Trigger %s completed but no review submitted", model_id)
+                    self._mark_agent_failed(session_id, model_id, "completed without submitting review")
 
     def _session_id_for_model(self, model_id: str) -> str | None:
         """Find the session ID that contains this model's agent state."""
-        for sid, session in self.manager.sessions.items():
+        current = self.manager.current_session
+        if current and model_id in current.agent_states:
+            return current.id
+
+        candidates = sorted(
+            self.manager.sessions.values(),
+            key=lambda s: s.created_at,
+            reverse=True,
+        )
+        for session in candidates:
             if model_id in session.agent_states:
-                return sid
+                return session.id
         return None
 
     def _mark_agent_failed(self, session_id: str | None, model_id: str, reason: str) -> None:
@@ -339,8 +518,37 @@ class Orchestrator:
             return
         agent.status = AgentStatus.FAILED
         agent.submitted_at = _utcnow()
+        self.manager.update_agent_runtime(session_id, model_id, reason=reason)
         self.manager.broker.publish(
             "agent_status",
             {"session_id": session_id, "model_id": model_id, "status": "failed", "reason": reason},
         )
         self._maybe_advance(session_id)
+        self.manager.persist()
+
+    def _mark_agent_waiting(self, session_id: str | None, model_id: str, reason: str) -> None:
+        """Mark an agent as waiting (non-fatal) and publish the event."""
+        if not session_id:
+            return
+        try:
+            session = self.manager.get_session(session_id)
+        except KeyError:
+            return
+        agent = session.agent_states.get(model_id)
+        if not agent:
+            return
+        agent.status = AgentStatus.WAITING
+        self.manager.update_agent_runtime(session_id, model_id, reason=reason)
+        self.manager.broker.publish(
+            "agent_status",
+            {"session_id": session_id, "model_id": model_id, "status": "waiting", "reason": reason},
+        )
+        self.manager.persist()
+
+    @staticmethod
+    def _clip_runtime_text(value: str) -> str:
+        text = (value or "").strip()
+        if len(text) <= MAX_RUNTIME_TEXT:
+            return text
+        omitted = len(text) - MAX_RUNTIME_TEXT
+        return text[:MAX_RUNTIME_TEXT] + f"\n\n... ({omitted} chars omitted)"

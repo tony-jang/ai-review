@@ -6,6 +6,7 @@ from ai_review.models import (
     DiffFile,
     Issue,
     Knowledge,
+    ModelConfig,
     Opinion,
     OpinionAction,
     RawIssue,
@@ -139,6 +140,66 @@ class TestIssue:
             thread=[op],
         )
         assert len(issue.thread) == 1
+
+
+class TestModelConfig:
+    def test_defaults(self):
+        mc = ModelConfig(id="opus")
+        assert mc.client_type == "claude-code"
+        assert mc.provider == ""
+        assert mc.model_id == ""
+        assert mc.role == ""
+        assert mc.description == ""
+        assert mc.color == ""
+        assert mc.avatar == ""
+        assert mc.system_prompt == ""
+        assert mc.temperature is None
+        assert mc.review_focus == []
+        assert mc.enabled is True
+
+    def test_with_all_fields(self):
+        mc = ModelConfig(
+            id="security-bot",
+            client_type="codex",
+            provider="openai",
+            model_id="gpt-5-codex",
+            role="Security Reviewer",
+            description="Specializes in finding security vulnerabilities",
+            color="#EF4444",
+            avatar="shield",
+            system_prompt="Focus on OWASP Top 10",
+            temperature=0.3,
+            review_focus=["security", "auth", "injection"],
+            enabled=True,
+        )
+        assert mc.id == "security-bot"
+        assert mc.color == "#EF4444"
+        assert mc.temperature == 0.3
+        assert len(mc.review_focus) == 3
+        assert "injection" in mc.review_focus
+
+    def test_backward_compatible_without_new_fields(self):
+        """Old-style config with only original fields should work."""
+        mc = ModelConfig(id="opus", client_type="claude-code", provider="anthropic", model_id="opus", role="general")
+        assert mc.enabled is True
+        assert mc.system_prompt == ""
+        assert mc.review_focus == []
+
+    def test_serialization_roundtrip(self):
+        mc = ModelConfig(
+            id="test",
+            color="#8B5CF6",
+            system_prompt="Be thorough.",
+            temperature=0.7,
+            review_focus=["perf"],
+            enabled=False,
+        )
+        data = mc.model_dump()
+        restored = ModelConfig.model_validate(data)
+        assert restored.color == "#8B5CF6"
+        assert restored.temperature == 0.7
+        assert restored.enabled is False
+        assert restored.review_focus == ["perf"]
 
 
 class TestReviewSession:

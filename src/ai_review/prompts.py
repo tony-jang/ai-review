@@ -2,19 +2,34 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_review.models import ModelConfig
+
 
 def build_review_prompt(
     session_id: str,
-    model_id: str,
-    role: str,
+    model_config: ModelConfig,
     api_base_url: str,
 ) -> str:
     """Build a prompt that instructs an LLM to perform a code review via REST API."""
+    model_id = model_config.id
+    role = model_config.role
+    review_focus = model_config.review_focus
+    system_prompt = model_config.system_prompt
+
     parts = [
         f"You are a code reviewer (model: {model_id}).",
     ]
+
+    if system_prompt:
+        parts.extend(["", "## System Instructions", "", system_prompt])
+
     if role:
         parts.append(f"Your review focus: {role}")
+    if review_focus:
+        parts.append(f"Focus areas: {', '.join(review_focus)}")
 
     parts.extend([
         "",
@@ -51,14 +66,23 @@ def build_review_prompt(
 
 def build_deliberation_prompt(
     session_id: str,
-    model_id: str,
+    model_config: ModelConfig,
     issue_ids: list[str],
     api_base_url: str,
 ) -> str:
     """Build a prompt that instructs an LLM to deliberate on pending issues."""
+    model_id = model_config.id
+    system_prompt = model_config.system_prompt
+
     issue_list = "\n".join(f"  - {iid}" for iid in issue_ids)
     parts = [
         f"You are a code reviewer (model: {model_id}) participating in a deliberation round.",
+    ]
+
+    if system_prompt:
+        parts.extend(["", "## System Instructions", "", system_prompt])
+
+    parts.extend([
         "",
         "## Instructions",
         "",
@@ -69,13 +93,21 @@ def build_deliberation_prompt(
         f"1. Retrieve the issue thread:",
         f"   curl {api_base_url}/api/issues/{{issue_id}}/thread",
         "2. Analyze the issue carefully — consider the code context, severity, and other opinions.",
+        "   - IMPORTANT: Judge the issue itself, not whether you personally like another reviewer's wording.",
+        "   - If you think the issue should be dismissed, choose action=no_fix explicitly.",
         f"3. Submit your opinion:",
         f"   curl -X POST {api_base_url}/api/issues/{{issue_id}}/opinions \\",
         f'     -H "Content-Type: application/json" \\',
         f'     -d \'{{"model_id": "{model_id}", "action": "...", "reasoning": "...", "suggested_severity": "..."}}\'',
-        "   - action: one of agree/disagree/clarify",
+        "   - action: one of fix_required/no_fix/comment",
         "   - reasoning: your analysis (be specific)",
-        "   - suggested_severity: your recommended severity (critical/high/medium/low) if you agree",
+        "   - suggested_severity: use only when action=fix_required (critical/high/medium/low). Leave null/omit otherwise.",
+        "",
+        "Decision rules:",
+        "- fix_required: You judge this issue as valid and code change is needed.",
+        "- no_fix: You judge this issue as invalid / should be dismissed.",
+        "- comment: You have an opinion or question but are not ready to decide yet.",
+        "- Do NOT use fix_required just to align with a person. If your final stance is dismiss, use no_fix.",
         "",
         "## Pending issue IDs",
         "",
@@ -86,7 +118,8 @@ def build_deliberation_prompt(
         "- Process ALL listed issues.",
         "- Deliberate independently. Do not ask for human input.",
         "- Be concise but substantive in your reasoning.",
+        "- You may mention other reviewers using @model_id (e.g., @codex) when asking follow-up in your reasoning.",
         "- Write all reasoning in Korean.",
         f"- Session ID: {session_id}",
-    ]
+    ])
     return "\n".join(parts)

@@ -28,9 +28,17 @@ class SessionStatus(str, enum.Enum):
 
 class OpinionAction(str, enum.Enum):
     RAISE = "raise"
-    AGREE = "agree"
-    DISAGREE = "disagree"
-    CLARIFY = "clarify"
+    FIX_REQUIRED = "fix_required"
+    NO_FIX = "no_fix"
+    COMMENT = "comment"
+
+    # Backward compatibility aliases
+    @classmethod
+    def _missing_(cls, value: object):
+        aliases = {"agree": cls.FIX_REQUIRED, "disagree": cls.NO_FIX, "clarify": cls.COMMENT}
+        if isinstance(value, str) and value.lower() in aliases:
+            return aliases[value.lower()]
+        return None
 
 
 def _utcnow() -> datetime:
@@ -89,10 +97,18 @@ class Opinion(BaseModel):
     action: OpinionAction
     reasoning: str
     suggested_severity: Severity | None = None
+    turn: int = 0
+    mentions: list[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=_utcnow)
 
 
 class AssistMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: datetime = Field(default_factory=_utcnow)
+
+
+class AgentChatMessage(BaseModel):
     role: str  # "user" or "assistant"
     content: str
     timestamp: datetime = Field(default_factory=_utcnow)
@@ -123,6 +139,13 @@ class ModelConfig(BaseModel):
     provider: str = ""
     model_id: str = ""
     role: str = ""
+    description: str = ""
+    color: str = ""
+    avatar: str = ""
+    system_prompt: str = ""
+    temperature: float | None = None
+    review_focus: list[str] = Field(default_factory=list)
+    enabled: bool = True
 
 
 class AgentStatus(str, enum.Enum):
@@ -142,8 +165,13 @@ class AgentState(BaseModel):
     status: AgentStatus = AgentStatus.WAITING
     task_type: AgentTaskType = AgentTaskType.REVIEW
     prompt_preview: str = ""
+    prompt_full: str = ""
     started_at: datetime | None = None
     submitted_at: datetime | None = None
+    last_reason: str = ""
+    last_output: str = ""
+    last_error: str = ""
+    updated_at: datetime | None = None
 
 
 class SessionConfig(BaseModel):
@@ -166,5 +194,6 @@ class ReviewSession(BaseModel):
     issues: list[Issue] = Field(default_factory=list)
     client_sessions: dict[str, str] = Field(default_factory=dict)
     agent_states: dict[str, AgentState] = Field(default_factory=dict)
+    agent_chats: dict[str, list[AgentChatMessage]] = Field(default_factory=dict)
     config: SessionConfig = Field(default_factory=SessionConfig)
     created_at: datetime = Field(default_factory=_utcnow)

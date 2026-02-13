@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ai_review.models import (
+    AgentState,
     AgentStatus,
     AgentTaskType,
     ModelConfig,
@@ -484,6 +485,82 @@ class TestAgentFailureTracking:
 
         # Agent should be FAILED because trigger "succeeded" but no review was submitted
         assert session.agent_states["codex"].status == AgentStatus.FAILED
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_deliberation_without_submission_becomes_waiting(self):
+        """In deliberation, missing submission should become WAITING (not FAILED)."""
+        models = [ModelConfig(id="codex", client_type="codex")]
+        mgr, session = _make_manager_with_config(models)
+        session.status = SessionStatus.DELIBERATING
+        session.agent_states["codex"] = AgentState(
+            model_id="codex",
+            status=AgentStatus.REVIEWING,
+            task_type=AgentTaskType.DELIBERATION,
+        )
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        await orch._fire_trigger(MockTrigger(), "mock-codex", "codex", "deliberate")
+        assert session.agent_states["codex"].status == AgentStatus.WAITING
+
+        await orch.close()
+
+
+class TestDisabledAgentSkip:
+    @pytest.mark.asyncio
+    async def test_disabled_agent_not_triggered(self):
+        """Agents with enabled=False should not be triggered on start."""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code", role="security"),
+            ModelConfig(id="gpt", client_type="claude-code", role="perf", enabled=False),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        orch._create_trigger = lambda ct: MockTrigger()
+
+        await orch.start(session.id)
+        await asyncio.sleep(0.05)
+
+        assert "opus" in session.agent_states
+        assert "gpt" not in session.agent_states
+        assert "opus" in orch._triggers
+        assert "gpt" not in orch._triggers
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_all_disabled_stays_manual(self):
+        """If all models are disabled, orchestrator stays in manual mode."""
+        models = [
+            ModelConfig(id="opus", enabled=False),
+            ModelConfig(id="gpt", enabled=False),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        await orch.start(session.id)
+
+        assert len(orch._triggers) == 0
+        assert len(session.agent_states) == 0
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_add_disabled_agent_is_noop(self):
+        """Adding a disabled agent via add_agent should be a no-op."""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code", enabled=False),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        await orch.add_agent(session.id, "gpt")
+
+        assert "gpt" not in session.agent_states
+        assert "gpt" not in orch._triggers
 
         await orch.close()
 
