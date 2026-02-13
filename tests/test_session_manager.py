@@ -398,6 +398,42 @@ class TestAddManualIssue:
         assert result["thread"][0]["model_id"] == "human"
 
 
+class TestUpdateAgent:
+    @pytest.mark.asyncio
+    async def test_updates_fields(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.add_agent(sid, {"id": "opus", "role": "general"})
+
+        result = manager.update_agent(sid, "opus", {
+            "role": "security",
+            "color": "#EF4444",
+            "description": "Security specialist",
+            "enabled": False,
+        })
+        assert result["role"] == "security"
+        assert result["color"] == "#EF4444"
+        assert result["description"] == "Security specialist"
+        assert result["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_id_immutable(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.add_agent(sid, {"id": "opus"})
+
+        result = manager.update_agent(sid, "opus", {"id": "hacked"})
+        assert result["id"] == "opus"
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_raises(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        with pytest.raises(KeyError, match="Agent not found"):
+            manager.update_agent(sid, "nonexistent", {"role": "test"})
+
+
 class TestListSessions:
     @pytest.mark.asyncio
     async def test_empty(self, manager):

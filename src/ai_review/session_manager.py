@@ -448,6 +448,7 @@ class SessionManager:
             if agent.started_at:
                 end = agent.submitted_at or _utcnow()
                 elapsed = (end - agent.started_at).total_seconds()
+            mc = next((m for m in session.config.models if m.id == model_id), None)
             result.append({
                 "model_id": model_id,
                 "status": agent.status.value,
@@ -455,9 +456,10 @@ class SessionManager:
                 "prompt_preview": agent.prompt_preview,
                 "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
                 "last_reason": agent.last_reason,
-                "role": next(
-                    (m.role for m in session.config.models if m.id == model_id), ""
-                ),
+                "role": mc.role if mc else "",
+                "color": mc.color if mc else "",
+                "enabled": mc.enabled if mc else True,
+                "description": mc.description if mc else "",
             })
         return result
 
@@ -527,6 +529,20 @@ class SessionManager:
         if any(m.id == mc.id for m in session.config.models):
             raise ValueError(f"Agent already exists: {mc.id}")
         session.config.models.append(mc)
+        self.persist()
+        return mc.model_dump(mode="json")
+
+    def update_agent(self, session_id: str, model_id: str, updates: dict) -> dict:
+        """Update fields on an existing model config."""
+        session = self.get_session(session_id)
+        mc = next((m for m in session.config.models if m.id == model_id), None)
+        if mc is None:
+            raise KeyError(f"Agent not found: {model_id}")
+        # id is immutable
+        updates.pop("id", None)
+        for key, value in updates.items():
+            if hasattr(mc, key):
+                setattr(mc, key, value)
         self.persist()
         return mc.model_dump(mode="json")
 

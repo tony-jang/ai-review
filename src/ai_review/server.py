@@ -235,6 +235,10 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     async def api_add_agent(request: Request):
         return await api_add_agent_by_session(_require_current_session(), request)
 
+    @app.put("/api/sessions/current/agents/{model_id}")
+    async def api_update_agent(model_id: str, request: Request):
+        return await api_update_agent_by_session(_require_current_session(), model_id, request)
+
     @app.delete("/api/sessions/current/agents/{model_id}")
     async def api_remove_agent(model_id: str):
         return await api_remove_agent_by_session(_require_current_session(), model_id)
@@ -268,6 +272,18 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
             manager.broker.publish("agent_config_changed", {"session_id": session_id})
             return JSONResponse(added, status_code=201)
         except (ValueError, KeyError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.put("/api/sessions/{session_id}/agents/{model_id}")
+    async def api_update_agent_by_session(session_id: str, model_id: str, request: Request):
+        body = await request.json()
+        try:
+            updated = manager.update_agent(session_id, model_id, body)
+            manager.broker.publish("agent_config_changed", {"session_id": session_id})
+            return JSONResponse(updated)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except (ValueError, TypeError) as e:
             raise HTTPException(status_code=400, detail=str(e))
 
     @app.delete("/api/sessions/{session_id}/agents/{model_id}")

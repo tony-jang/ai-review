@@ -201,6 +201,46 @@ class TestServerOrchestrator:
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
+    async def test_update_agent_endpoint(self, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        # Add agent
+        await client.post(f"/api/sessions/{sid}/agents", json={
+            "id": "test-bot",
+            "client_type": "claude-code",
+            "role": "general",
+        })
+
+        # Update agent
+        resp = await client.put(f"/api/sessions/{sid}/agents/test-bot", json={
+            "role": "security",
+            "color": "#EF4444",
+            "enabled": False,
+            "description": "Security specialist",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["role"] == "security"
+        assert data["color"] == "#EF4444"
+        assert data["enabled"] is False
+
+        # Verify via list
+        resp = await client.get(f"/api/sessions/{sid}/agents")
+        agents = resp.json()
+        bot = next(a for a in agents if a["id"] == "test-bot")
+        assert bot["role"] == "security"
+        assert bot["color"] == "#EF4444"
+
+    @pytest.mark.asyncio
+    async def test_update_nonexistent_agent(self, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        resp = await client.put(f"/api/sessions/{sid}/agents/ghost", json={"role": "x"})
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
     async def test_session_scoped_issue_thread(self, client):
         resp = await client.post("/api/sessions", json={"base": "main"})
         sid = resp.json()["session_id"]
