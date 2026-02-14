@@ -51,6 +51,12 @@ class TestServerOrchestrator:
         data = resp.json()
         assert data["session_id"] == session_id
         assert "files" in data
+        assert "available_apis" in data
+        apis = data["available_apis"]
+        assert any("/files/" in a for a in apis)
+        assert any("/search" in a for a in apis)
+        assert any("/tree" in a for a in apis)
+        assert any("/context" in a for a in apis)
 
     @pytest.mark.asyncio
     async def test_file_content_endpoint(self, client, tmp_path):
@@ -882,3 +888,55 @@ class TestServerOrchestrator:
     async def test_report_nonexistent_session(self, client):
         resp = await client.get("/api/sessions/nonexistent-id/report")
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_m0_api_only_reviewer_e2e(self, app, client, tmp_path):
+        """M0 end-to-end: session -> file read -> search -> tree -> activity -> index APIs."""
+        # Create test files
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("def hello():\n    return 42\n")
+
+        # 1. Start session
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        assert resp.status_code == 200
+        sid = resp.json()["session_id"]
+
+        # Register an agent to get an access key
+        resp = await client.post(f"/api/sessions/{sid}/agents", json={
+            "id": "test-reviewer", "client_type": "claude-code",
+        })
+        assert resp.status_code == 201
+
+        manager = app.state.manager
+        agent_key = manager.ensure_agent_access_key(sid, "test-reviewer")
+        headers = {"X-Agent-Key": agent_key}
+
+        # 2. Context index — verify available_apis
+        resp = await client.get(f"/api/sessions/{sid}/index", headers=headers)
+        assert resp.status_code == 200
+        index = resp.json()
+        assert "available_apis" in index
+
+        # 3. Read source file
+        resp = await client.get(f"/api/sessions/{sid}/files/src/main.py", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["total_lines"] == 2
+
+        # 4. Search code
+        resp = await client.get(f"/api/sessions/{sid}/search?q=hello", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["total_matches"] >= 1
+
+        # 5. Browse tree
+        resp = await client.get(f"/api/sessions/{sid}/tree", headers=headers)
+        assert resp.status_code == 200
+        names = {e["name"] for e in resp.json()["entries"]}
+        assert "src" in names
+
+        # 6. Verify activity was recorded
+        session = manager.get_session(sid)
+        actions = [a.action for a in session.agent_activities]
+        assert "view_index" in actions
+        assert "view_file" in actions
+        assert "search" in actions
+        assert "view_tree" in actions
