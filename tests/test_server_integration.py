@@ -502,6 +502,78 @@ class TestServerOrchestrator:
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
+    async def test_agent_connection_test_trigger_exception(self, client, monkeypatch):
+        """When send_prompt raises an exception, the response should be trigger_failed."""
+
+        class ExplodingTrigger:
+            async def create_session(self, model_id: str) -> str:
+                return "explode-session"
+
+            async def send_prompt(self, client_session_id: str, model_id: str, prompt: str, *, model_config=None):
+                raise RuntimeError("CLI crashed")
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr("ai_review.server.ClaudeCodeTrigger", ExplodingTrigger)
+
+        resp = await client.post("/api/agents/connection-test", json={
+            "client_type": "claude-code",
+            "timeout_seconds": 10,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["status"] == "trigger_failed"
+        assert "CLI crashed" in data["reason"]
+
+    @pytest.mark.asyncio
+    async def test_agent_connection_test_token_cleaned_after_success(self, client, monkeypatch):
+        """After a successful connection test, the same token should not be reusable (cleaned up)."""
+        captured: dict[str, str] = {}
+
+        class FakeClaudeTrigger:
+            async def create_session(self, model_id: str) -> str:
+                return "fake-session"
+
+            async def send_prompt(self, client_session_id: str, model_id: str, prompt: str, *, model_config=None):
+                captured["prompt"] = prompt
+                await asyncio.sleep(5)
+                return TriggerResult(success=True, output="done")
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr("ai_review.server.ClaudeCodeTrigger", FakeClaudeTrigger)
+
+        req_task = asyncio.create_task(client.post("/api/agents/connection-test", json={
+            "client_type": "claude-code",
+            "timeout_seconds": 10,
+        }))
+
+        for _ in range(200):
+            if "prompt" in captured:
+                break
+            await asyncio.sleep(0.01)
+        assert "prompt" in captured
+
+        m = re.search(r"http://localhost:9999/api/agents/connection-test/callback/[0-9a-f]+", captured["prompt"])
+        assert m
+        callback_path = m.group(0).replace("http://localhost:9999", "")
+
+        # First callback — should succeed and complete the test
+        cb = await client.post(callback_path, json={"ping": "pong"})
+        assert cb.status_code == 200
+
+        resp = await req_task
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        # Re-use the same callback token — should be 404 (cleaned up)
+        cb2 = await client.post(callback_path, json={"ping": "pong"})
+        assert cb2.status_code == 404
+
+    @pytest.mark.asyncio
     async def test_full_manual_flow(self, client):
         # Start
         resp = await client.post("/api/sessions", json={"base": "main"})

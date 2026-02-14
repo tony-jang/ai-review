@@ -506,6 +506,106 @@ class TestAgentFailureTracking:
         await orch.close()
 
 
+class TestFireTriggerRetry:
+    """Tests for _fire_trigger retry logic."""
+
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_after_transient_failure(self):
+        """First attempt fails, retry succeeds — agent should NOT be FAILED."""
+        models = [ModelConfig(id="codex", client_type="codex")]
+        mgr, session = _make_manager_with_config(models)
+        session.agent_states["codex"] = AgentState(model_id="codex", status=AgentStatus.REVIEWING)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+        orch._trigger_retry_delays = [0.0]  # fast retry
+
+        call_count = 0
+
+        class TransientTrigger(TriggerEngine):
+            async def create_session(self, model_id: str) -> str:
+                return "t-session"
+
+            async def send_prompt(self, client_session_id, model_id, prompt, model_config=None):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise RuntimeError("transient failure")
+                return TriggerResult(success=True, output="ok", client_session_id=client_session_id)
+
+            async def close(self):
+                pass
+
+        trigger = TransientTrigger()
+        await orch._fire_trigger(session.id, trigger, "t-session", "codex", "review this")
+
+        assert call_count == 2
+        agent = session.agent_states["codex"]
+        # Retry succeeded: runtime output was recorded and reason is "trigger completed",
+        # NOT the transient exception message.
+        assert agent.last_output == "ok"
+        assert agent.last_reason != "transient failure"
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_trigger_result_failure(self):
+        """TriggerResult(success=False) should NOT be retried."""
+        models = [ModelConfig(id="codex", client_type="codex")]
+        mgr, session = _make_manager_with_config(models)
+        session.agent_states["codex"] = AgentState(model_id="codex", status=AgentStatus.REVIEWING)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+        orch._trigger_retry_delays = [0.0, 0.0]
+
+        call_count = 0
+
+        class FailResultTrigger(TriggerEngine):
+            async def create_session(self, model_id: str) -> str:
+                return "f-session"
+
+            async def send_prompt(self, client_session_id, model_id, prompt, model_config=None):
+                nonlocal call_count
+                call_count += 1
+                return TriggerResult(success=False, error="bad input")
+
+            async def close(self):
+                pass
+
+        trigger = FailResultTrigger()
+        await orch._fire_trigger(session.id, trigger, "f-session", "codex", "review this")
+
+        assert call_count == 1
+        assert session.agent_states["codex"].status == AgentStatus.FAILED
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_all_retries_exhausted(self):
+        """All attempts fail with exceptions — agent should be FAILED."""
+        models = [ModelConfig(id="codex", client_type="codex")]
+        mgr, session = _make_manager_with_config(models)
+        session.agent_states["codex"] = AgentState(model_id="codex", status=AgentStatus.REVIEWING)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+        orch._trigger_retry_delays = [0.0, 0.0]  # 2 retries = 3 total attempts
+
+        call_count = 0
+
+        class AlwaysFailTrigger(TriggerEngine):
+            async def create_session(self, model_id: str) -> str:
+                return "a-session"
+
+            async def send_prompt(self, client_session_id, model_id, prompt, model_config=None):
+                nonlocal call_count
+                call_count += 1
+                raise RuntimeError("persistent failure")
+
+            async def close(self):
+                pass
+
+        trigger = AlwaysFailTrigger()
+        await orch._fire_trigger(session.id, trigger, "a-session", "codex", "review this")
+
+        assert call_count == 3
+        assert session.agent_states["codex"].status == AgentStatus.FAILED
+        await orch.close()
+
+
 class TestDisabledAgentSkip:
     @pytest.mark.asyncio
     async def test_disabled_agent_not_triggered(self):
