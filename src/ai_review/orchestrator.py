@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from ai_review.consensus import apply_consensus
 from ai_review.dedup import deduplicate_issues
-from ai_review.models import AgentState, AgentStatus, AgentTaskType, SessionStatus, _utcnow
+from ai_review.models import AgentState, AgentStatus, AgentTaskType, ModelConfig, SessionStatus, _utcnow
 from ai_review.prompts import build_deliberation_prompt, build_review_prompt
 from ai_review.state import can_transition, transition
 from ai_review.trigger.base import TriggerEngine
@@ -30,6 +30,7 @@ class Orchestrator:
     def __init__(self, manager: SessionManager, api_base_url: str) -> None:
         self.manager = manager
         self.api_base_url = api_base_url
+        self._close_timeout_seconds = 5.0
         # Session-scoped: session_id -> model_id -> engine
         self._triggers: dict[str, dict[str, TriggerEngine]] = {}
         # Session-scoped: session_id -> list of tasks
@@ -63,17 +64,20 @@ class Orchestrator:
             trigger = self._create_trigger(mc.client_type)
             session_triggers[mc.id] = trigger
             session.agent_states[mc.id] = AgentState(model_id=mc.id)
+            self.manager.ensure_agent_access_key(session_id, mc.id)
 
         # Fire-and-forget review prompts for each model
         for mc in enabled_models:
             trigger = session_triggers[mc.id]
             client_sid = await trigger.create_session(mc.id)
             session.client_sessions[mc.id] = client_sid
+            agent_key = self.manager.ensure_agent_access_key(session_id, mc.id)
 
             prompt = build_review_prompt(
                 session_id=session_id,
                 model_config=mc,
                 api_base_url=self.api_base_url,
+                agent_key=agent_key,
             )
 
             # Mark agent as reviewing
@@ -82,6 +86,7 @@ class Orchestrator:
             session.agent_states[mc.id].prompt_preview = prompt[:200]
             session.agent_states[mc.id].prompt_full = prompt
             session.agent_states[mc.id].started_at = _utcnow()
+            session.agent_states[mc.id].submitted_at = None
             self.manager.update_agent_runtime(
                 session_id,
                 mc.id,
@@ -101,7 +106,7 @@ class Orchestrator:
             )
 
             task = asyncio.create_task(
-                self._fire_trigger(session_id, trigger, client_sid, mc.id, prompt),
+                self._fire_trigger(session_id, trigger, client_sid, mc.id, prompt, model_config=mc),
                 name=f"review-{session_id[:8]}-{mc.id}",
             )
             session_tasks.append(task)
@@ -131,8 +136,7 @@ class Orchestrator:
         all_triggers: list[TriggerEngine] = []
         for triggers in self._triggers.values():
             all_triggers.extend(triggers.values())
-        for trigger in all_triggers:
-            await trigger.close()
+        await self._close_triggers(all_triggers, reason="server shutdown")
         self._triggers.clear()
 
         # Detach callbacks
@@ -158,8 +162,7 @@ class Orchestrator:
             await asyncio.gather(*tasks, return_exceptions=True)
 
         triggers = self._triggers.pop(session_id, {})
-        for trigger in triggers.values():
-            await trigger.close()
+        await self._close_triggers(list(triggers.values()), reason=f"stop session {session_id}")
 
         self.manager.persist()
 
@@ -180,6 +183,7 @@ class Orchestrator:
         trigger = self._create_trigger(mc.client_type)
         session_triggers[model_id] = trigger
         session.agent_states[model_id] = AgentState(model_id=model_id)
+        agent_key = self.manager.ensure_agent_access_key(session_id, model_id)
         client_sid = await trigger.create_session(model_id)
         session.client_sessions[model_id] = client_sid
 
@@ -190,11 +194,14 @@ class Orchestrator:
                 session.agent_states[model_id].submitted_at = _utcnow()
                 return
             issue_ids = [p["id"] for p in pending]
+            round_turn = max(int(p.get("turn", 0)) for p in pending)
             prompt = build_deliberation_prompt(
                 session_id=session_id,
                 model_config=mc,
                 issue_ids=issue_ids,
                 api_base_url=self.api_base_url,
+                turn=round_turn,
+                agent_key=agent_key,
             )
             session.agent_states[model_id].task_type = AgentTaskType.DELIBERATION
         else:
@@ -202,6 +209,7 @@ class Orchestrator:
                 session_id=session_id,
                 model_config=mc,
                 api_base_url=self.api_base_url,
+                agent_key=agent_key,
             )
             session.agent_states[model_id].task_type = AgentTaskType.REVIEW
 
@@ -209,6 +217,7 @@ class Orchestrator:
         session.agent_states[model_id].prompt_preview = prompt[:200]
         session.agent_states[model_id].prompt_full = prompt
         session.agent_states[model_id].started_at = _utcnow()
+        session.agent_states[model_id].submitted_at = None
         self.manager.update_agent_runtime(
             session_id,
             model_id,
@@ -228,7 +237,7 @@ class Orchestrator:
         )
         session_tasks = self._pending_tasks.setdefault(session_id, [])
         task = asyncio.create_task(
-            self._fire_trigger(session_id, trigger, client_sid, model_id, prompt),
+            self._fire_trigger(session_id, trigger, client_sid, model_id, prompt, model_config=mc),
             name=f"dynamic-{session_id[:8]}-{model_id}",
         )
         session_tasks.append(task)
@@ -239,7 +248,7 @@ class Orchestrator:
         session_triggers = self._triggers.get(session_id, {})
         trigger = session_triggers.pop(model_id, None)
         if trigger is not None:
-            await trigger.close()
+            await self._close_triggers([trigger], reason=f"remove agent {model_id}")
         self.manager.get_session(session_id).agent_states.pop(model_id, None)
         self.manager.get_session(session_id).client_sessions.pop(model_id, None)
         self._maybe_advance(session_id)
@@ -364,11 +373,15 @@ class Orchestrator:
                 continue
 
             issue_ids = [p["id"] for p in pending]
+            round_turn = max(int(p.get("turn", 0)) for p in pending)
+            agent_key = self.manager.ensure_agent_access_key(session_id, mc.id)
             prompt = build_deliberation_prompt(
                 session_id=session_id,
                 model_config=mc,
                 issue_ids=issue_ids,
                 api_base_url=self.api_base_url,
+                turn=round_turn,
+                agent_key=agent_key,
             )
 
             # Update agent state for deliberation
@@ -409,7 +422,7 @@ class Orchestrator:
 
             session_tasks = self._pending_tasks.setdefault(session_id, [])
             task = asyncio.create_task(
-                self._fire_trigger(session_id, trigger, client_sid, mc.id, prompt),
+                self._fire_trigger(session_id, trigger, client_sid, mc.id, prompt, model_config=mc),
                 name=f"deliberate-{session_id[:8]}-{mc.id}",
             )
             session_tasks.append(task)
@@ -487,12 +500,34 @@ class Orchestrator:
             return GeminiTrigger()
         return ClaudeCodeTrigger()
 
+    async def _close_triggers(self, triggers: list[TriggerEngine], *, reason: str) -> None:
+        if not triggers:
+            return
+
+        async def _safe_close(trigger: TriggerEngine) -> None:
+            try:
+                await asyncio.wait_for(
+                    trigger.close(),
+                    timeout=self._close_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Trigger close timed out after %.1fs during %s",
+                    self._close_timeout_seconds,
+                    reason,
+                )
+            except Exception:
+                logger.exception("Trigger close failed during %s", reason)
+
+        await asyncio.gather(*(_safe_close(trigger) for trigger in triggers))
+
     async def _fire_trigger(
-        self, session_id: str, trigger: TriggerEngine, client_session_id: str, model_id: str, prompt: str
+        self, session_id: str, trigger: TriggerEngine, client_session_id: str, model_id: str, prompt: str,
+        *, model_config: "ModelConfig | None" = None,
     ) -> None:
         """Fire a trigger and log the result (fire-and-forget wrapper)."""
         try:
-            result = await trigger.send_prompt(client_session_id, model_id, prompt)
+            result = await trigger.send_prompt(client_session_id, model_id, prompt, model_config=model_config)
             if session_id:
                 self.manager.update_agent_runtime(
                     session_id,
@@ -563,6 +598,8 @@ class Orchestrator:
         if not agent:
             return
         agent.status = AgentStatus.WAITING
+        if agent.submitted_at is None:
+            agent.submitted_at = _utcnow()
         self.manager.update_agent_runtime(session_id, model_id, reason=reason)
         self.manager.broker.publish(
             "agent_status",

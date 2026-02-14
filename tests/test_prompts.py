@@ -26,6 +26,9 @@ class TestBuildReviewPrompt:
         assert "/api/sessions/sess1/index" in prompt
         assert "/api/sessions/sess1/context" in prompt
         assert "/api/sessions/sess1/reviews" in prompt
+        assert "/api/sessions/sess1/overall-reviews" in prompt
+        assert "line_start" in prompt
+        assert "line_end" in prompt
 
     def test_empty_role_omits_focus(self):
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
@@ -58,6 +61,32 @@ class TestBuildReviewPrompt:
         assert "Security Reviewer" in prompt
         assert "xss" in prompt
 
+    def test_includes_agent_key_header(self):
+        prompt = build_review_prompt("sess1", _mc("codex"), "http://localhost:3000", agent_key="k_test_123")
+        assert "X-Agent-Key: k_test_123" in prompt
+
+    def test_no_local_tools(self):
+        prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "Do NOT use local tools" in prompt
+        # Should not instruct to use git/sed/rg directly
+        assert "Use local tools" not in prompt
+
+    def test_contains_file_api(self):
+        prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/files/" in prompt
+
+    def test_contains_search_api(self):
+        prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/search?" in prompt
+
+    def test_contains_tree_api(self):
+        prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/tree?" in prompt
+
+    def test_agent_key_for_get_requests(self):
+        prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000", agent_key="k1")
+        assert "both GET and POST" in prompt
+
 
 class TestBuildDeliberationPrompt:
     def test_contains_model_id(self):
@@ -75,9 +104,19 @@ class TestBuildDeliberationPrompt:
 
     def test_contains_api_endpoints(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
-        assert "/api/issues/" in prompt
+        assert "/api/sessions/sess1/issues/" in prompt
         assert "/thread" in prompt
         assert "/opinions" in prompt
+        assert "/api/sessions/sess1/overall-reviews" in prompt
+
+    def test_contains_turn_for_deliberation(self):
+        prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000", turn=2)
+        assert "Current deliberation turn: 2" in prompt
+        assert '"turn":2' in prompt
+
+    def test_includes_agent_key_header(self):
+        prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000", turn=1, agent_key="k_test_456")
+        assert "X-Agent-Key: k_test_456" in prompt
 
     def test_contains_action_options(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
@@ -90,6 +129,16 @@ class TestBuildDeliberationPrompt:
         assert "Judge the issue itself" in prompt
         assert "Do NOT use fix_required just to align with a person" in prompt
 
+    def test_contains_issue_mention_syntax(self):
+        prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
+        assert "@issue_id" in prompt
+        assert "@1d9f63acf240" in prompt
+
+    def test_contains_markdown_guidance(self):
+        prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
+        assert "**bold**" in prompt
+        assert "~~strikethrough~~" in prompt
+
     def test_system_prompt_included(self):
         mc = _mc("gpt", system_prompt="Focus on performance implications.")
         prompt = build_deliberation_prompt("sess1", mc, ["iss1"], "http://localhost:3000")
@@ -99,3 +148,15 @@ class TestBuildDeliberationPrompt:
     def test_no_system_prompt_omits_section(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
         assert "## System Instructions" not in prompt
+
+    def test_no_local_tools(self):
+        prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
+        assert "Do NOT use local tools" in prompt
+
+    def test_uses_session_scoped_thread_url(self):
+        prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
+        assert "/api/sessions/sess1/issues/" in prompt
+
+    def test_file_content_api_available(self):
+        prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
+        assert "/files/" in prompt

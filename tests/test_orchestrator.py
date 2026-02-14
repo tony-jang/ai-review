@@ -37,7 +37,7 @@ class MockTrigger(TriggerEngine):
         return sid
 
     async def send_prompt(
-        self, client_session_id: str, model_id: str, prompt: str
+        self, client_session_id: str, model_id: str, prompt: str, model_config=None
     ) -> TriggerResult:
         self.sent_prompts.append((client_session_id, model_id, prompt))
         return TriggerResult(success=True, output="ok", client_session_id=client_session_id)
@@ -347,7 +347,7 @@ class SlowMockTrigger(TriggerEngine):
     async def create_session(self, model_id: str) -> str:
         return f"slow-{model_id}"
 
-    async def send_prompt(self, client_session_id, model_id, prompt):
+    async def send_prompt(self, client_session_id, model_id, prompt, model_config=None):
         await self.release.wait()
         return TriggerResult(success=True, output="ok", client_session_id=client_session_id)
 
@@ -366,8 +366,7 @@ class TestAgentStateTracking:
         orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         # Use slow trigger so agents stay in REVIEWING
-        slow = SlowMockTrigger()
-        orch._create_trigger = lambda ct: slow
+        orch._create_trigger = lambda ct: SlowMockTrigger()
 
         await orch.start(session.id)
         await asyncio.sleep(0.05)
@@ -377,6 +376,7 @@ class TestAgentStateTracking:
         assert session.agent_states["opus"].status == AgentStatus.REVIEWING
         assert session.agent_states["gpt"].status == AgentStatus.REVIEWING
         assert session.agent_states["opus"].started_at is not None
+        assert session.agent_states["opus"].submitted_at is None
 
         await orch.close()
 
@@ -390,8 +390,7 @@ class TestAgentStateTracking:
         orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
 
         # Use slow trigger so gpt stays in REVIEWING
-        slow = SlowMockTrigger()
-        orch._create_trigger = lambda ct: slow
+        orch._create_trigger = lambda ct: SlowMockTrigger()
 
         await orch.start(session.id)
         await asyncio.sleep(0.05)
@@ -424,7 +423,7 @@ class TestAgentFailureTracking:
             async def create_session(self, model_id: str) -> str:
                 return "fail-session"
 
-            async def send_prompt(self, client_session_id, model_id, prompt):
+            async def send_prompt(self, client_session_id, model_id, prompt, model_config=None):
                 return TriggerResult(
                     success=False, error="sandbox blocked", client_session_id=client_session_id
                 )
@@ -453,7 +452,7 @@ class TestAgentFailureTracking:
             async def create_session(self, model_id: str) -> str:
                 return "explode-session"
 
-            async def send_prompt(self, client_session_id, model_id, prompt):
+            async def send_prompt(self, client_session_id, model_id, prompt, model_config=None):
                 raise RuntimeError("CLI not found")
 
             async def close(self):
@@ -501,6 +500,7 @@ class TestAgentFailureTracking:
 
         await orch._fire_trigger(session.id, MockTrigger(), "mock-codex", "codex", "deliberate")
         assert session.agent_states["codex"].status == AgentStatus.WAITING
+        assert session.agent_states["codex"].submitted_at is not None
 
         await orch.close()
 
@@ -648,8 +648,7 @@ class TestSessionIsolation:
         mgr.sessions[s1.id] = s1
         mgr.sessions[s2.id] = s2
 
-        slow = SlowMockTrigger()
-        orch._create_trigger = lambda ct: slow
+        orch._create_trigger = lambda ct: SlowMockTrigger()
 
         await orch.start(s1.id)
         await orch.start(s2.id)
