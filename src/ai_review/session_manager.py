@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import secrets
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ai_review.git_diff import collect_diff, get_current_branch, get_diff_summary, parse_diff
+from ai_review.git_diff import collect_diff, get_current_branch, get_diff_summary, list_branches, parse_diff, validate_repo
 from ai_review.knowledge import load_config, load_knowledge
 from ai_review.models import (
+    AgentActivity,
     AgentChatMessage,
     AgentState,
     AgentStatus,
@@ -19,9 +23,11 @@ from ai_review.models import (
     DiffFile,
     Issue,
     Knowledge,
+    MergeDecision,
     ModelConfig,
     Opinion,
     OpinionAction,
+    OverallReview,
     RawIssue,
     Review,
     ReviewSession,
@@ -41,6 +47,7 @@ class SessionManager:
     def __init__(self, repo_path: str | None = None) -> None:
         self.repo_path = repo_path
         self.sessions: dict[str, ReviewSession] = {}
+        self.agent_presets: dict[str, ModelConfig] = {}
         self.broker = SSEBroker()
         self._current_session_id: str | None = None
         self._state_file = self._resolve_state_file(repo_path)
@@ -71,6 +78,7 @@ class SessionManager:
                 "status": s.status.value,
                 "base": s.base,
                 "head": s.head,
+                "repo_path": s.repo_path,
                 "review_count": len(s.reviews),
                 "issue_count": len(s.issues),
                 "files_changed": len(s.diff),
@@ -111,10 +119,20 @@ class SessionManager:
                 for agent in session.agent_states.values():
                     if agent.status == AgentStatus.REVIEWING:
                         agent.status = AgentStatus.FAILED
+                        if agent.submitted_at is None:
+                            agent.submitted_at = _utcnow()
                         agent.last_reason = "interrupted: server restarted"
                         agent.updated_at = _utcnow()
                 loaded[session.id] = session
             self.sessions = loaded
+            presets = raw.get("agent_presets", [])
+            loaded_presets: dict[str, ModelConfig] = {}
+            if isinstance(presets, dict):
+                presets = list(presets.values())
+            for item in presets:
+                mc = ModelConfig.model_validate(item)
+                loaded_presets[mc.id] = mc
+            self.agent_presets = loaded_presets
             current = raw.get("current_session_id")
             self._current_session_id = current if current in loaded else None
         except Exception:
@@ -127,6 +145,7 @@ class SessionManager:
             payload = {
                 "current_session_id": self._current_session_id,
                 "sessions": [s.model_dump(mode="json") for s in self.sessions.values()],
+                "agent_presets": [p.model_dump(mode="json") for p in self.agent_presets.values()],
             }
             temp = self._state_file.with_suffix(".tmp")
             temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -134,13 +153,37 @@ class SessionManager:
         except Exception:
             logger.exception("Failed to persist session state to %s", self._state_file)
 
-    async def start_review(self, base: str = "main") -> dict:
+    async def start_review(
+        self,
+        base: str = "main",
+        head: str | None = None,
+        repo_path: str | None = None,
+        preset_ids: list[str] | None = None,
+    ) -> dict:
         """Start a new review session: collect diff and knowledge."""
-        # Load config
-        config = load_config(self.repo_path) if self.repo_path else None
+        effective_repo = repo_path or self.repo_path
 
-        session = ReviewSession(base=base)
-        if config:
+        # Load config
+        config = load_config(effective_repo) if effective_repo else None
+
+        session = ReviewSession(base=base, repo_path=effective_repo or "")
+        if preset_ids is not None:
+            if not isinstance(preset_ids, list):
+                raise ValueError("preset_ids must be a list")
+            if not preset_ids:
+                raise ValueError("preset_ids must include at least one preset id")
+            resolved: list[ModelConfig] = []
+            missing: list[str] = []
+            for preset_id in preset_ids:
+                mc = self.agent_presets.get(str(preset_id))
+                if mc is None:
+                    missing.append(str(preset_id))
+                    continue
+                resolved.append(ModelConfig.model_validate(mc.model_dump(mode="json")))
+            if missing:
+                raise ValueError(f"Unknown preset ids: {', '.join(missing)}")
+            session.config.models = resolved
+        elif config:
             session.config = config
 
         self.sessions[session.id] = session
@@ -151,10 +194,10 @@ class SessionManager:
         self.broker.publish("phase_change", {"status": "collecting", "session_id": session.id})
 
         # Collect diff
-        if self.repo_path:
-            session.head = await get_current_branch(self.repo_path)
-            session.diff = await collect_diff(base, self.repo_path)
-            session.knowledge = load_knowledge(self.repo_path)
+        if effective_repo:
+            session.head = head or await get_current_branch(effective_repo)
+            session.diff = await collect_diff(base, effective_repo, head=session.head)
+            session.knowledge = load_knowledge(effective_repo)
 
         # Transition to REVIEWING
         transition(session, SessionStatus.REVIEWING)
@@ -165,6 +208,225 @@ class SessionManager:
         summary["head"] = session.head
         self.persist()
         return summary
+
+    MAX_FILE_LINES = 2000
+
+    def read_file(
+        self,
+        session_id: str,
+        file_path: str,
+        start: int | None = None,
+        end: int | None = None,
+    ) -> dict:
+        """Read source file content with optional line range.
+
+        Returns lines from the repo working tree (not diff).
+        Access is restricted to files within session.repo_path.
+        """
+        session = self.get_session(session_id)
+        repo_root = Path(session.repo_path).expanduser().resolve() if session.repo_path else Path.cwd().resolve()
+
+        target = Path(file_path).expanduser()
+        resolved = target.resolve() if target.is_absolute() else (repo_root / target).resolve()
+
+        # Block access outside repo boundary
+        try:
+            resolved.relative_to(repo_root)
+        except ValueError:
+            raise PermissionError(f"Access denied: path is outside repository ({file_path})")
+
+        if not resolved.is_file():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        all_lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
+        total = len(all_lines)
+
+        # Normalize range (1-based)
+        s = max(1, start or 1)
+        e = min(total, end or total)
+        if e - s + 1 > self.MAX_FILE_LINES:
+            e = s + self.MAX_FILE_LINES - 1
+
+        selected = all_lines[s - 1 : e]
+
+        return {
+            "path": file_path,
+            "start_line": s,
+            "end_line": e,
+            "total_lines": total,
+            "content": "\n".join(selected),
+            "lines": [{"number": s + i, "content": line} for i, line in enumerate(selected)],
+        }
+
+    _TREE_EXCLUDE = frozenset({
+        ".git", "node_modules", "__pycache__", ".venv", "venv",
+        ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+        ".eggs", "dist", "build", ".ai-review",
+    })
+    MAX_TREE_DEPTH = 5
+
+    def get_tree(
+        self,
+        session_id: str,
+        path: str = "",
+        depth: int = 2,
+    ) -> dict:
+        """Return directory tree under session repo_path."""
+        session = self.get_session(session_id)
+        repo_root = Path(session.repo_path).expanduser().resolve() if session.repo_path else Path.cwd().resolve()
+
+        target = (repo_root / path).resolve() if path else repo_root
+        try:
+            target.relative_to(repo_root)
+        except ValueError:
+            raise PermissionError(f"Access denied: path is outside repository ({path})")
+
+        if not target.is_dir():
+            raise FileNotFoundError(f"Directory not found: {path}")
+
+        depth = max(1, min(depth, self.MAX_TREE_DEPTH))
+        entries = self._walk_tree(target, depth)
+        return {"path": path or ".", "entries": entries}
+
+    def _walk_tree(self, directory: Path, depth: int) -> list[dict]:
+        if depth <= 0:
+            return []
+        entries: list[dict] = []
+        try:
+            children = sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except PermissionError:
+            return []
+        for child in children:
+            if child.name in self._TREE_EXCLUDE:
+                continue
+            if child.name.startswith(".") and child.is_dir():
+                continue
+            if child.is_dir():
+                entries.append({
+                    "name": child.name,
+                    "type": "directory",
+                    "children": self._walk_tree(child, depth - 1),
+                })
+            elif child.is_file():
+                try:
+                    size = child.stat().st_size
+                except OSError:
+                    size = 0
+                entries.append({"name": child.name, "type": "file", "size": size})
+        return entries
+
+    MAX_SEARCH_RESULTS = 100
+    SEARCH_TIMEOUT = 5.0
+
+    async def search_code(
+        self,
+        session_id: str,
+        query: str,
+        glob: str | None = None,
+        max_results: int = 30,
+        context_lines: int = 1,
+    ) -> dict:
+        """Search code in repo using ripgrep with Python fallback."""
+        session = self.get_session(session_id)
+        repo_root = Path(session.repo_path).expanduser().resolve() if session.repo_path else Path.cwd().resolve()
+
+        max_results = max(1, min(max_results, self.MAX_SEARCH_RESULTS))
+
+        if shutil.which("rg"):
+            return await self._search_rg(repo_root, query, glob, max_results, context_lines)
+        return self._search_python(repo_root, query, glob, max_results, context_lines)
+
+    async def _search_rg(
+        self, root: Path, query: str, glob: str | None, max_results: int, context_lines: int,
+    ) -> dict:
+        cmd = [
+            "rg", "--json",
+            "-m", str(max_results),
+            "-C", str(context_lines),
+            "--max-filesize", "1M",
+        ]
+        if glob:
+            cmd.extend(["-g", glob])
+        cmd.extend([query, str(root)])
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self.SEARCH_TIMEOUT)
+        except asyncio.TimeoutError:
+            return {"query": query, "glob": glob, "results": [], "total_matches": 0, "truncated": False, "error": "timeout"}
+
+        results: list[dict] = []
+        total = 0
+        for line in stdout.decode("utf-8", errors="replace").splitlines():
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "match":
+                data = obj["data"]
+                path = data["path"]["text"]
+                try:
+                    rel = str(Path(path).relative_to(root))
+                except ValueError:
+                    rel = path
+                results.append({
+                    "file": rel,
+                    "line": data["line_number"],
+                    "content": data["lines"]["text"].rstrip("\n"),
+                })
+                total += 1
+
+        return {
+            "query": query,
+            "glob": glob,
+            "results": results[:max_results],
+            "total_matches": total,
+            "truncated": total > max_results,
+        }
+
+    def _search_python(
+        self, root: Path, query: str, glob_pattern: str | None, max_results: int, context_lines: int,
+    ) -> dict:
+        """Pure-Python fallback when rg is not installed."""
+        import fnmatch
+
+        try:
+            pattern = re.compile(query)
+        except re.error:
+            pattern = re.compile(re.escape(query))
+
+        results: list[dict] = []
+        total = 0
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            if any(part in self._TREE_EXCLUDE for part in path.parts):
+                continue
+            if glob_pattern and not fnmatch.fnmatch(path.name, glob_pattern):
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for i, line in enumerate(lines):
+                if pattern.search(line):
+                    total += 1
+                    if len(results) < max_results:
+                        results.append({
+                            "file": str(path.relative_to(root)),
+                            "line": i + 1,
+                            "content": line.rstrip("\n"),
+                        })
+
+        return {
+            "query": query,
+            "glob": glob_pattern,
+            "results": results,
+            "total_matches": total,
+            "truncated": total > max_results,
+        }
 
     def get_review_context(self, session_id: str, file: str | None = None) -> dict:
         """Return diff + knowledge for the session."""
@@ -202,10 +464,11 @@ class SessionManager:
             "base": session.base,
             "head": session.head,
             "files": files,
-            "suggested_commands": [
-                f"git diff {session.base}...HEAD -- <path>",
-                "sed -n '<start>,<end>p' <path>",
-                "rg '<symbol-or-keyword>' <path>",
+            "available_apis": [
+                f"GET /api/sessions/{session.id}/files/{{path}}?start={{n}}&end={{n}}",
+                f"GET /api/sessions/{session.id}/search?q={{keyword}}&glob={{pattern}}",
+                f"GET /api/sessions/{session.id}/tree?path={{dir}}&depth={{n}}",
+                f"GET /api/sessions/{session.id}/context?file={{path}}",
             ],
         }
 
@@ -241,6 +504,50 @@ class SessionManager:
             })
         return hunks
 
+    @staticmethod
+    def _normalize_issue_lines(
+        line: int | None,
+        line_start: int | None,
+        line_end: int | None,
+    ) -> tuple[int | None, int | None, int | None]:
+        """Normalize line/range fields while keeping backward compatibility."""
+        start = line_start if line_start is not None else line
+        end = line_end if line_end is not None else start
+
+        if start is None and end is not None:
+            start = end
+        if start is not None and end is not None and end < start:
+            start, end = end, start
+
+        normalized_line = line if line is not None else start
+        return normalized_line, start, end
+
+    @staticmethod
+    def _looks_like_markdown(text: str) -> bool:
+        return bool(
+            re.search(
+                r"(^\s{0,3}#{1,6}\s)|(^\s{0,3}[-*+]\s)|(^\s{0,3}\d+\.\s)|(```)|(`[^`\n]+`)|(^\s{0,3}>)",
+                text,
+                flags=re.MULTILINE,
+            )
+        )
+
+    @classmethod
+    def _ensure_issue_markdown(cls, text: str, heading: str) -> str:
+        content = (text or "").strip()
+        if not content:
+            return ""
+        if cls._looks_like_markdown(content):
+            return content
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        if len(lines) == 1:
+            body = lines[0]
+        else:
+            body = "\n".join(f"- {line}" for line in lines)
+        return f"### {heading}\n{body}"
+
     def submit_review(
         self, session_id: str, model_id: str, issues: list[dict], summary: str = ""
     ) -> dict:
@@ -250,7 +557,15 @@ class SessionManager:
         if session.status != SessionStatus.REVIEWING:
             raise ValueError(f"Cannot submit review in {session.status.value} state")
 
-        raw_issues = [RawIssue(**i) for i in issues]
+        normalized_issues: list[dict] = []
+        for issue in issues:
+            item = dict(issue)
+            item["description"] = self._ensure_issue_markdown(str(item.get("description", "")), "문제")
+            if "suggestion" in item:
+                item["suggestion"] = self._ensure_issue_markdown(str(item.get("suggestion", "")), "개선 제안")
+            normalized_issues.append(item)
+
+        raw_issues = [RawIssue(**i) for i in normalized_issues]
         review = Review(model_id=model_id, issues=raw_issues, summary=summary)
         session.reviews.append(review)
 
@@ -275,10 +590,133 @@ class SessionManager:
         self.persist()
         return result
 
+    def ensure_agent_access_key(self, session_id: str, model_id: str) -> str:
+        """Get or create an access key for one configured agent."""
+        session = self.get_session(session_id)
+        existing = session.agent_access_keys.get(model_id)
+        if existing:
+            return existing
+        key = secrets.token_hex(24)
+        session.agent_access_keys[model_id] = key
+        self.persist()
+        return key
+
+    def issue_human_assist_access_key(self, session_id: str) -> str:
+        """Issue (rotate) access key for human-assist mediator."""
+        session = self.get_session(session_id)
+        key = secrets.token_hex(24)
+        session.human_assist_access_key = key
+        self.persist()
+        return key
+
     def get_all_reviews(self, session_id: str) -> list[dict]:
         """Get all submitted reviews."""
         session = self.get_session(session_id)
         return [r.model_dump(mode="json") for r in session.reviews]
+
+    @staticmethod
+    def _normalize_notes(items: list[str] | None) -> list[str]:
+        normalized: list[str] = []
+        for item in items or []:
+            text = str(item).strip()
+            if text:
+                normalized.append(text)
+        return normalized
+
+    @staticmethod
+    def _current_turn(session: ReviewSession) -> int:
+        return max((i.turn for i in session.issues), default=0)
+
+    def submit_overall_review(
+        self,
+        session_id: str,
+        model_id: str,
+        merge_decision: str = "needs_discussion",
+        summary: str = "",
+        task_type: str = "review",
+        turn: int | None = None,
+        highlights: list[str] | None = None,
+        blockers: list[str] | None = None,
+        recommendations: list[str] | None = None,
+    ) -> dict:
+        """Submit or update an overall reviewer verdict for a specific turn."""
+        session = self.get_session(session_id)
+        if session.status in (SessionStatus.IDLE, SessionStatus.COLLECTING):
+            raise ValueError(f"Cannot submit overall review in {session.status.value} state")
+
+        task = AgentTaskType(task_type)
+        if turn is None:
+            turn = 0 if task == AgentTaskType.REVIEW else self._current_turn(session)
+        if turn < 0:
+            raise ValueError("turn must be >= 0")
+
+        decision = MergeDecision(merge_decision)
+        normalized_highlights = self._normalize_notes(highlights)
+        normalized_blockers = self._normalize_notes(blockers)
+        normalized_recommendations = self._normalize_notes(recommendations)
+
+        existing = next(
+            (
+                r for r in session.overall_reviews
+                if r.model_id == model_id and r.task_type == task and r.turn == turn
+            ),
+            None,
+        )
+
+        if existing is None:
+            existing = OverallReview(
+                model_id=model_id,
+                task_type=task,
+                turn=turn,
+                merge_decision=decision,
+                summary=summary or "",
+                highlights=normalized_highlights,
+                blockers=normalized_blockers,
+                recommendations=normalized_recommendations,
+            )
+            session.overall_reviews.append(existing)
+            status = "accepted"
+        else:
+            existing.merge_decision = decision
+            existing.summary = summary or ""
+            existing.highlights = normalized_highlights
+            existing.blockers = normalized_blockers
+            existing.recommendations = normalized_recommendations
+            existing.submitted_at = _utcnow()
+            status = "updated"
+
+        self.broker.publish(
+            "overall_review_submitted",
+            {
+                "session_id": session_id,
+                "model_id": model_id,
+                "task_type": task.value,
+                "turn": turn,
+                "merge_decision": decision.value,
+            },
+        )
+
+        self.persist()
+        return {
+            "status": status,
+            "turn": turn,
+            "task_type": task.value,
+            "overall_review_count": len(session.overall_reviews),
+            "overall_review": existing.model_dump(mode="json"),
+        }
+
+    def get_overall_reviews(self, session_id: str, turn: int | None = None) -> list[dict]:
+        """Get overall reviewer verdicts for a session (optionally filtered by turn)."""
+        session = self.get_session(session_id)
+        reviews = session.overall_reviews
+        if turn is not None:
+            reviews = [r for r in reviews if r.turn == turn]
+        ordered = sorted(
+            reviews,
+            key=lambda r: (r.turn, r.task_type.value, r.submitted_at),
+            reverse=True,
+        )
+        return [r.model_dump(mode="json") for r in ordered]
 
     def create_issues_from_reviews(self, session_id: str) -> list[Issue]:
         """Create Issue objects from all submitted RawIssues (pre-dedup)."""
@@ -287,11 +725,18 @@ class SessionManager:
         issues: list[Issue] = []
         for review in session.reviews:
             for raw in review.issues:
+                normalized_line, normalized_start, normalized_end = self._normalize_issue_lines(
+                    raw.line,
+                    raw.line_start,
+                    raw.line_end,
+                )
                 issue = Issue(
                     title=raw.title,
                     severity=raw.severity,
                     file=raw.file,
-                    line=raw.line,
+                    line=normalized_line,
+                    line_start=normalized_start,
+                    line_end=normalized_end,
                     description=raw.description,
                     suggestion=raw.suggestion,
                     raised_by=review.model_id,
@@ -422,6 +867,8 @@ class SessionManager:
             "base": session.base,
             "head": session.head,
             "review_count": len(session.reviews),
+            "overall_review_count": len(session.overall_reviews),
+            "current_turn": self._current_turn(session),
             "issue_count": len(session.issues),
             "files_changed": len(session.diff),
             "files": [
@@ -444,10 +891,7 @@ class SessionManager:
                 )
 
         for model_id, agent in session.agent_states.items():
-            elapsed = None
-            if agent.started_at:
-                end = agent.submitted_at or _utcnow()
-                elapsed = (end - agent.started_at).total_seconds()
+            elapsed = self._compute_agent_elapsed(agent)
             mc = next((m for m in session.config.models if m.id == model_id), None)
             result.append({
                 "model_id": model_id,
@@ -462,6 +906,21 @@ class SessionManager:
                 "description": mc.description if mc else "",
             })
         return result
+
+    def _compute_agent_elapsed(self, agent: AgentState) -> float | None:
+        """Compute elapsed time for the current task run.
+
+        - REVIEWING: keep ticking with current wall clock.
+        - WAITING/SUBMITTED/FAILED: freeze at terminal timestamp (submitted/updated).
+        """
+        if not agent.started_at:
+            return None
+        if agent.status == AgentStatus.REVIEWING:
+            end = _utcnow()
+        else:
+            end = agent.submitted_at or agent.updated_at or agent.started_at
+        elapsed = (end - agent.started_at).total_seconds()
+        return max(elapsed, 0.0)
 
     def update_agent_runtime(
         self,
@@ -493,10 +952,7 @@ class SessionManager:
         if not agent:
             raise KeyError(f"Agent not found: {model_id}")
 
-        elapsed = None
-        if agent.started_at:
-            end = agent.submitted_at or _utcnow()
-            elapsed = round((end - agent.started_at).total_seconds(), 1)
+        elapsed = self._compute_agent_elapsed(agent)
 
         pending = self.get_pending_issues(session_id, model_id)
         return {
@@ -508,7 +964,7 @@ class SessionManager:
             "prompt_full": agent.prompt_full,
             "started_at": agent.started_at.isoformat() if agent.started_at else None,
             "submitted_at": agent.submitted_at.isoformat() if agent.submitted_at else None,
-            "elapsed_seconds": elapsed,
+            "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
             "last_reason": agent.last_reason,
             "last_output": agent.last_output,
             "last_error": agent.last_error,
@@ -521,6 +977,39 @@ class SessionManager:
         """List configured agents for a session."""
         session = self.get_session(session_id)
         return [m.model_dump(mode="json") for m in session.config.models]
+
+    def list_agent_presets(self) -> list[dict]:
+        """List all persisted agent presets."""
+        return [m.model_dump(mode="json") for m in sorted(self.agent_presets.values(), key=lambda x: x.id)]
+
+    def add_agent_preset(self, model: dict) -> dict:
+        """Add a new agent preset."""
+        mc = ModelConfig(**model)
+        if mc.id in self.agent_presets:
+            raise ValueError(f"Agent preset already exists: {mc.id}")
+        self.agent_presets[mc.id] = mc
+        self.persist()
+        return mc.model_dump(mode="json")
+
+    def update_agent_preset(self, preset_id: str, updates: dict) -> dict:
+        """Update fields on an existing agent preset."""
+        mc = self.agent_presets.get(preset_id)
+        if mc is None:
+            raise KeyError(f"Agent preset not found: {preset_id}")
+        updates.pop("id", None)
+        for key, value in updates.items():
+            if hasattr(mc, key):
+                setattr(mc, key, value)
+        self.persist()
+        return mc.model_dump(mode="json")
+
+    def remove_agent_preset(self, preset_id: str) -> dict:
+        """Remove an agent preset."""
+        if preset_id not in self.agent_presets:
+            raise KeyError(f"Agent preset not found: {preset_id}")
+        del self.agent_presets[preset_id]
+        self.persist()
+        return {"status": "removed", "preset_id": preset_id}
 
     def add_agent(self, session_id: str, model: dict) -> dict:
         """Add a model config to the session."""
@@ -574,6 +1063,45 @@ class SessionManager:
         )
         self.persist()
 
+    _ACTIVITY_DEDUP_SECONDS = 10.0
+
+    def record_activity(
+        self, session_id: str, model_id: str, action: str, target: str,
+    ) -> bool:
+        """Record an agent activity event. Returns False if suppressed as duplicate."""
+        session = self.get_session(session_id)
+        now = _utcnow()
+
+        # Dedup: suppress same model+action+target within threshold
+        for act in reversed(session.agent_activities):
+            if act.model_id != model_id:
+                continue
+            if act.action == action and act.target == target:
+                elapsed = (now - act.timestamp).total_seconds()
+                if elapsed < self._ACTIVITY_DEDUP_SECONDS:
+                    return False
+                break
+
+        activity = AgentActivity(model_id=model_id, action=action, target=target, timestamp=now)
+        session.agent_activities.append(activity)
+
+        self.broker.publish("agent_activity", {
+            "session_id": session_id,
+            "model_id": model_id,
+            "action": action,
+            "target": target,
+            "timestamp": now.isoformat(),
+        })
+        return True
+
+    def resolve_model_id_from_key(self, session_id: str, agent_key: str) -> str | None:
+        """Reverse-lookup model_id from agent access key."""
+        session = self.get_session(session_id)
+        for mid, key in session.agent_access_keys.items():
+            if key == agent_key:
+                return mid
+        return None
+
     def add_manual_issue(
         self,
         session_id: str,
@@ -583,17 +1111,27 @@ class SessionManager:
         line: int | None,
         description: str,
         suggestion: str = "",
+        line_start: int | None = None,
+        line_end: int | None = None,
     ) -> dict:
         """Add a manually created issue to the session."""
         session = self.get_session(session_id)
         if session.status not in (SessionStatus.REVIEWING, SessionStatus.DELIBERATING):
             raise ValueError(f"Cannot add issue in {session.status.value} state")
 
+        normalized_line, normalized_start, normalized_end = self._normalize_issue_lines(
+            line,
+            line_start,
+            line_end,
+        )
+
         issue = Issue(
             title=title,
             severity=Severity(severity),
             file=file,
-            line=line,
+            line=normalized_line,
+            line_start=normalized_start,
+            line_end=normalized_end,
             description=description,
             suggestion=suggestion,
             raised_by="human",
@@ -629,6 +1167,8 @@ class SessionManager:
                 "consensus": issue.consensus,
                 "file": issue.file,
                 "line": issue.line,
+                "line_start": issue.line_start,
+                "line_end": issue.line_end,
                 "thread_summary": f"{len(issue.thread)} opinions",
             })
             if issue.consensus:

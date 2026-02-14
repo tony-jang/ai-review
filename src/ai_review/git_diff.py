@@ -33,13 +33,66 @@ async def get_current_branch(repo_path: str | Path | None = None) -> str:
     return stdout.decode().strip() or "HEAD"
 
 
-async def collect_diff(base: str = "main", repo_path: str | Path | None = None) -> list[DiffFile]:
+async def validate_repo(repo_path: str | Path) -> dict:
+    """Validate a git repository path.
+
+    Returns {'valid': bool, 'root': str, 'current_branch': str, 'error'?: str}.
+    """
+    cwd = str(repo_path)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--show-toplevel",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            return {"valid": False, "root": "", "current_branch": "", "error": stderr.decode().strip()}
+        root = stdout.decode().strip()
+        branch = await get_current_branch(root)
+        return {"valid": True, "root": root, "current_branch": branch}
+    except (FileNotFoundError, OSError) as e:
+        return {"valid": False, "root": "", "current_branch": "", "error": str(e)}
+
+
+async def list_branches(repo_path: str | Path | None = None) -> list[dict]:
+    """List local and remote branches.
+
+    Returns [{'name': 'main', 'type': 'local'}, {'name': 'origin/main', 'type': 'remote'}, ...].
+    """
+    cwd = str(repo_path) if repo_path else None
+    proc = await asyncio.create_subprocess_exec(
+        "git", "branch", "-a", "--format=%(refname:short)",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    stdout, _ = await proc.communicate()
+    branches: list[dict] = []
+    for line in stdout.decode().strip().splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        if name.endswith("/HEAD"):
+            continue
+        if "/" in name and not name.startswith("refs/"):
+            branches.append({"name": name, "type": "remote"})
+        else:
+            branches.append({"name": name, "type": "local"})
+    return branches
+
+
+async def collect_diff(
+    base: str = "main", repo_path: str | Path | None = None, *, head: str = "HEAD",
+) -> list[DiffFile]:
     """Run git diff and parse into DiffFile list."""
     cwd = str(repo_path) if repo_path else None
+    diff_range = f"{base}...{head}"
 
     # Get numstat for per-file additions/deletions
     numstat_proc = await asyncio.create_subprocess_exec(
-        "git", "diff", f"{base}...HEAD", "--numstat",
+        "git", "diff", diff_range, "--numstat",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
@@ -48,7 +101,7 @@ async def collect_diff(base: str = "main", repo_path: str | Path | None = None) 
 
     # Get full diff for content
     diff_proc = await asyncio.create_subprocess_exec(
-        "git", "diff", f"{base}...HEAD",
+        "git", "diff", diff_range,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
