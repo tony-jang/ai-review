@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local / generated
+.ai-review/
+.playwright-mcp/
+.tmp_session_context.json
