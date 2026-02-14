@@ -78,15 +78,21 @@ def _merge_issues(primary: Issue, duplicates: list[Issue]) -> Issue:
 
     primary.severity = best_severity
 
-    # Merge threads (add duplicate raisers as "agree" opinions)
+    # Merge threads (add duplicate raisers as "agree" opinions).
+    # Do not add self-agree or duplicate-agree from the same model.
+    existing_models = {op.model_id for op in primary.thread}
     for dup in duplicates:
+        if dup.raised_by in existing_models:
+            continue
         primary.thread.append(
             Opinion(
                 model_id=dup.raised_by,
-                action=OpinionAction.AGREE,
+                action=OpinionAction.FIX_REQUIRED,
                 reasoning=f"[Merged duplicate] {dup.description}",
                 suggested_severity=dup.severity,
+                turn=primary.turn,
             )
         )
+        existing_models.add(dup.raised_by)
 
     return primary

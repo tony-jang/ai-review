@@ -16,22 +16,22 @@ def check_consensus(issue: Issue, threshold: int = 2) -> bool:
     if not issue.thread:
         return False
 
-    # Count agree/disagree (exclude raise and clarify)
-    agree_count = 0
-    disagree_count = 0
+    # Count fix_required/no_fix (exclude raise and comment)
+    fix_count = 0
+    no_fix_count = 0
     voters: set[str] = set()
 
     for op in issue.thread:
-        if op.model_id in voters and op.action in (OpinionAction.AGREE, OpinionAction.DISAGREE):
+        if op.model_id in voters and op.action in (OpinionAction.FIX_REQUIRED, OpinionAction.NO_FIX):
             continue  # only count first vote per model
-        if op.action == OpinionAction.AGREE or op.action == OpinionAction.RAISE:
-            agree_count += 1
+        if op.action == OpinionAction.FIX_REQUIRED or op.action == OpinionAction.RAISE:
+            fix_count += 1
             voters.add(op.model_id)
-        elif op.action == OpinionAction.DISAGREE:
-            disagree_count += 1
+        elif op.action == OpinionAction.NO_FIX:
+            no_fix_count += 1
             voters.add(op.model_id)
 
-    return agree_count >= threshold or disagree_count >= threshold
+    return fix_count >= threshold or no_fix_count >= threshold
 
 
 def determine_final_severity(issue: Issue) -> Severity:
@@ -50,9 +50,9 @@ def determine_final_severity(issue: Issue) -> Severity:
             continue
         seen_models.add(op.model_id)
 
-        if op.action == OpinionAction.DISAGREE:
+        if op.action == OpinionAction.NO_FIX:
             disagree_count += 1
-        elif op.action in (OpinionAction.RAISE, OpinionAction.AGREE):
+        elif op.action in (OpinionAction.RAISE, OpinionAction.FIX_REQUIRED):
             agree_count += 1
             if op.suggested_severity:
                 severity_votes.append(op.suggested_severity)

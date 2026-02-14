@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from ai_review.models import (
+    AgentActivity,
     DiffFile,
     Issue,
     Knowledge,
@@ -73,6 +74,8 @@ class TestRawIssue:
         )
         assert issue.title == "Bug"
         assert issue.line is None
+        assert issue.line_start is None
+        assert issue.line_end is None
         assert issue.suggestion == ""
 
     def test_all_fields(self, sample_raw_issues):
@@ -98,17 +101,17 @@ class TestOpinion:
     def test_creation(self):
         op = Opinion(
             model_id="opus",
-            action=OpinionAction.AGREE,
+            action=OpinionAction.FIX_REQUIRED,
             reasoning="Valid concern",
             suggested_severity=Severity.MEDIUM,
         )
-        assert op.action == OpinionAction.AGREE
+        assert op.action == OpinionAction.FIX_REQUIRED
         assert op.suggested_severity == Severity.MEDIUM
 
     def test_without_severity(self):
         op = Opinion(
             model_id="gpt",
-            action=OpinionAction.CLARIFY,
+            action=OpinionAction.COMMENT,
             reasoning="Need more context",
         )
         assert op.suggested_severity is None
@@ -130,7 +133,7 @@ class TestIssue:
     def test_with_thread(self):
         op = Opinion(
             model_id="gpt",
-            action=OpinionAction.AGREE,
+            action=OpinionAction.FIX_REQUIRED,
             reasoning="Confirmed",
         )
         issue = Issue(
@@ -148,6 +151,7 @@ class TestModelConfig:
         assert mc.client_type == "claude-code"
         assert mc.provider == ""
         assert mc.model_id == ""
+        assert mc.test_endpoint == ""
         assert mc.role == ""
         assert mc.description == ""
         assert mc.color == ""
@@ -163,6 +167,7 @@ class TestModelConfig:
             client_type="codex",
             provider="openai",
             model_id="gpt-5-codex",
+            test_endpoint="https://example.com/health",
             role="Security Reviewer",
             description="Specializes in finding security vulnerabilities",
             color="#EF4444",
@@ -175,6 +180,7 @@ class TestModelConfig:
         assert mc.id == "security-bot"
         assert mc.color == "#EF4444"
         assert mc.temperature == 0.3
+        assert mc.test_endpoint == "https://example.com/health"
         assert len(mc.review_focus) == 3
         assert "injection" in mc.review_focus
 
@@ -202,6 +208,31 @@ class TestModelConfig:
         assert restored.review_focus == ["perf"]
 
 
+class TestAgentActivity:
+    def test_creation(self):
+        act = AgentActivity(model_id="alpha", action="view_file", target="src/main.py:1-10")
+        assert act.model_id == "alpha"
+        assert act.action == "view_file"
+        assert act.target == "src/main.py:1-10"
+        assert act.timestamp is not None
+
+    def test_serialization_roundtrip(self):
+        act = AgentActivity(model_id="beta", action="search", target="search:greet")
+        data = act.model_dump(mode="json")
+        restored = AgentActivity.model_validate(data)
+        assert restored.model_id == "beta"
+
+    def test_session_default_empty(self):
+        session = ReviewSession()
+        assert session.agent_activities == []
+
+    def test_session_without_activities_field(self):
+        """Backward compat: old JSON without agent_activities deserializes fine."""
+        data = {"id": "test123", "base": "main", "status": "idle"}
+        session = ReviewSession.model_validate(data)
+        assert session.agent_activities == []
+
+
 class TestReviewSession:
     def test_defaults(self):
         session = ReviewSession()
@@ -211,6 +242,7 @@ class TestReviewSession:
         assert session.reviews == []
         assert session.issues == []
         assert session.client_sessions == {}
+        assert session.agent_activities == []
         assert len(session.id) == 12
 
     def test_with_data(self, sample_session):

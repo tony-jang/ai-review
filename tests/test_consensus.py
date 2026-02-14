@@ -28,8 +28,8 @@ class TestCheckConsensus:
     def test_consensus_with_agrees(self):
         opinions = [
             _make_opinion("opus", OpinionAction.RAISE, Severity.HIGH),
-            _make_opinion("gpt", OpinionAction.AGREE, Severity.HIGH),
-            _make_opinion("gemini", OpinionAction.AGREE, Severity.HIGH),
+            _make_opinion("gpt", OpinionAction.FIX_REQUIRED, Severity.HIGH),
+            _make_opinion("gemini", OpinionAction.FIX_REQUIRED, Severity.HIGH),
         ]
         issue = _make_issue_with_thread(opinions)
         assert check_consensus(issue, threshold=2) is True
@@ -44,8 +44,8 @@ class TestCheckConsensus:
     def test_consensus_with_disagrees(self):
         opinions = [
             _make_opinion("opus", OpinionAction.RAISE, Severity.HIGH),
-            _make_opinion("gpt", OpinionAction.DISAGREE),
-            _make_opinion("gemini", OpinionAction.DISAGREE),
+            _make_opinion("gpt", OpinionAction.NO_FIX),
+            _make_opinion("gemini", OpinionAction.NO_FIX),
         ]
         issue = _make_issue_with_thread(opinions)
         assert check_consensus(issue, threshold=2) is True
@@ -53,7 +53,7 @@ class TestCheckConsensus:
     def test_mixed_no_consensus(self):
         opinions = [
             _make_opinion("opus", OpinionAction.RAISE, Severity.HIGH),
-            _make_opinion("gpt", OpinionAction.DISAGREE),
+            _make_opinion("gpt", OpinionAction.NO_FIX),
         ]
         issue = _make_issue_with_thread(opinions)
         # 1 agree (raise), 1 disagree → no consensus at threshold 2
@@ -66,7 +66,7 @@ class TestCheckConsensus:
     def test_clarify_doesnt_count(self):
         opinions = [
             _make_opinion("opus", OpinionAction.RAISE, Severity.HIGH),
-            _make_opinion("gpt", OpinionAction.CLARIFY),
+            _make_opinion("gpt", OpinionAction.COMMENT),
         ]
         issue = _make_issue_with_thread(opinions)
         assert check_consensus(issue, threshold=2) is False
@@ -76,8 +76,8 @@ class TestDetermineFinalSeverity:
     def test_majority_agrees(self):
         opinions = [
             _make_opinion("opus", OpinionAction.RAISE, Severity.CRITICAL),
-            _make_opinion("gpt", OpinionAction.AGREE, Severity.HIGH),
-            _make_opinion("gemini", OpinionAction.AGREE, Severity.HIGH),
+            _make_opinion("gpt", OpinionAction.FIX_REQUIRED, Severity.HIGH),
+            _make_opinion("gemini", OpinionAction.FIX_REQUIRED, Severity.HIGH),
         ]
         issue = _make_issue_with_thread(opinions)
         severity = determine_final_severity(issue)
@@ -86,8 +86,8 @@ class TestDetermineFinalSeverity:
     def test_majority_disagrees(self):
         opinions = [
             _make_opinion("opus", OpinionAction.RAISE, Severity.HIGH),
-            _make_opinion("gpt", OpinionAction.DISAGREE),
-            _make_opinion("gemini", OpinionAction.DISAGREE),
+            _make_opinion("gpt", OpinionAction.NO_FIX),
+            _make_opinion("gemini", OpinionAction.NO_FIX),
         ]
         issue = _make_issue_with_thread(opinions)
         severity = determine_final_severity(issue)
@@ -96,7 +96,7 @@ class TestDetermineFinalSeverity:
     def test_no_severity_votes(self):
         opinions = [
             _make_opinion("opus", OpinionAction.RAISE, None),
-            _make_opinion("gpt", OpinionAction.AGREE, None),
+            _make_opinion("gpt", OpinionAction.FIX_REQUIRED, None),
         ]
         issue = _make_issue_with_thread(opinions)
         issue.severity = Severity.MEDIUM
@@ -116,12 +116,12 @@ class TestApplyConsensus:
     def test_applies_to_all_issues(self):
         issue1 = _make_issue_with_thread([
             _make_opinion("opus", OpinionAction.RAISE, Severity.HIGH),
-            _make_opinion("gpt", OpinionAction.AGREE, Severity.HIGH),
+            _make_opinion("gpt", OpinionAction.FIX_REQUIRED, Severity.HIGH),
         ])
         issue2 = _make_issue_with_thread([
             _make_opinion("opus", OpinionAction.RAISE, Severity.LOW),
-            _make_opinion("gpt", OpinionAction.DISAGREE),
-            _make_opinion("gemini", OpinionAction.DISAGREE),
+            _make_opinion("gpt", OpinionAction.NO_FIX),
+            _make_opinion("gemini", OpinionAction.NO_FIX),
         ])
 
         result = apply_consensus([issue1, issue2], threshold=2)

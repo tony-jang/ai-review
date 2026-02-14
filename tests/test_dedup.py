@@ -83,7 +83,7 @@ class TestDeduplicateIssues:
         assert len(result[0].thread) == 2
         assert result[0].thread[0].model_id == "opus"
         assert result[0].thread[1].model_id == "gpt"
-        assert result[0].thread[1].action == OpinionAction.AGREE
+        assert result[0].thread[1].action == OpinionAction.FIX_REQUIRED
 
     def test_keeps_highest_severity(self):
         issue_high = _make_issue("Auth issue", "api.py", 42, "opus")
@@ -109,3 +109,15 @@ class TestDeduplicateIssues:
         # "No auth on endpoint" may or may not merge depending on word overlap
         # but "Missing auth check" and "Auth check missing" should merge
         assert len(result) <= 2
+
+    def test_does_not_add_self_agree_when_same_model_duplicates(self):
+        issues = [
+            _make_issue("Missing auth check", "api.py", 42, "codex1"),
+            _make_issue("Auth check missing in endpoint", "api.py", 43, "codex1"),
+        ]
+        result = deduplicate_issues(issues)
+        assert len(result) == 1
+        # Keep only the original raise from codex1 (no self-agree line)
+        assert len(result[0].thread) == 1
+        assert result[0].thread[0].model_id == "codex1"
+        assert result[0].thread[0].action == OpinionAction.RAISE

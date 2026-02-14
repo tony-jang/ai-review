@@ -90,7 +90,7 @@ async def submit_opinion(
     reasoning: str,
     suggested_severity: str | None = None,
 ) -> dict:
-    """특정 이슈에 대한 토론 의견을 제출합니다. action: agree/disagree/clarify"""
+    """특정 이슈에 대한 토론 의견을 제출합니다. action: fix_required/no_fix/comment"""
     mgr = _get_manager()
     session = mgr.current_session
     if not session:

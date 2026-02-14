@@ -78,6 +78,8 @@ class RawIssue(BaseModel):
     severity: Severity
     file: str
     line: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
     description: str
     suggestion: str = ""
 
@@ -86,6 +88,7 @@ class Review(BaseModel):
     model_id: str
     issues: list[RawIssue]
     summary: str = ""
+    turn: int = 0
     submitted_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -120,6 +123,8 @@ class Issue(BaseModel):
     severity: Severity
     file: str
     line: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
     description: str = ""
     suggestion: str = ""
     raised_by: str = ""
@@ -138,6 +143,7 @@ class ModelConfig(BaseModel):
     client_type: str = "claude-code"
     provider: str = ""
     model_id: str = ""
+    test_endpoint: str = ""
     role: str = ""
     description: str = ""
     color: str = ""
@@ -146,6 +152,7 @@ class ModelConfig(BaseModel):
     temperature: float | None = None
     review_focus: list[str] = Field(default_factory=list)
     enabled: bool = True
+    strictness: str = "balanced"  # "strict" | "balanced" | "lenient"
 
 
 class AgentStatus(str, enum.Enum):
@@ -158,6 +165,24 @@ class AgentStatus(str, enum.Enum):
 class AgentTaskType(str, enum.Enum):
     REVIEW = "review"
     DELIBERATION = "deliberation"
+
+
+class MergeDecision(str, enum.Enum):
+    MERGEABLE = "mergeable"
+    NOT_MERGEABLE = "not_mergeable"
+    NEEDS_DISCUSSION = "needs_discussion"
+
+
+class OverallReview(BaseModel):
+    model_id: str
+    task_type: AgentTaskType = AgentTaskType.REVIEW
+    turn: int = 0
+    merge_decision: MergeDecision = MergeDecision.NEEDS_DISCUSSION
+    summary: str = ""
+    highlights: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    submitted_at: datetime = Field(default_factory=_utcnow)
 
 
 class AgentState(BaseModel):
@@ -180,6 +205,16 @@ class SessionConfig(BaseModel):
     consensus_threshold: int = 2
 
 
+# --- Agent Activity ---
+
+
+class AgentActivity(BaseModel):
+    model_id: str
+    action: str  # "view_file", "search", "view_tree", "view_diff", "view_context", "view_index"
+    target: str  # "src/main.py:10-50", "search:func_name", "tree:src/"
+    timestamp: datetime = Field(default_factory=_utcnow)
+
+
 # --- Session ---
 
 
@@ -187,13 +222,18 @@ class ReviewSession(BaseModel):
     id: str = Field(default_factory=_uuid)
     base: str = "main"
     head: str = ""
+    repo_path: str = ""
     status: SessionStatus = SessionStatus.IDLE
     diff: list[DiffFile] = Field(default_factory=list)
     knowledge: Knowledge = Field(default_factory=Knowledge)
     reviews: list[Review] = Field(default_factory=list)
+    overall_reviews: list[OverallReview] = Field(default_factory=list)
     issues: list[Issue] = Field(default_factory=list)
+    agent_access_keys: dict[str, str] = Field(default_factory=dict)
+    human_assist_access_key: str | None = None
     client_sessions: dict[str, str] = Field(default_factory=dict)
     agent_states: dict[str, AgentState] = Field(default_factory=dict)
     agent_chats: dict[str, list[AgentChatMessage]] = Field(default_factory=dict)
+    agent_activities: list[AgentActivity] = Field(default_factory=list)
     config: SessionConfig = Field(default_factory=SessionConfig)
     created_at: datetime = Field(default_factory=_utcnow)
