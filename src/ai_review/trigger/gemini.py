@@ -1,12 +1,13 @@
-"""Codex CLI trigger engine — subprocess-based."""
+"""Gemini CLI trigger engine — subprocess-based with resume support."""
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+import json
 import re
-from typing import TYPE_CHECKING
 import uuid
+from contextlib import suppress
+from typing import TYPE_CHECKING, Any
 
 from ai_review.trigger.base import TriggerEngine, TriggerResult
 
@@ -14,47 +15,52 @@ if TYPE_CHECKING:
     from ai_review.models import ModelConfig
 
 
-class CodexTrigger(TriggerEngine):
-    """Trigger OpenAI Codex CLI via subprocess and resume existing sessions."""
+class GeminiTrigger(TriggerEngine):
+    """Trigger Gemini CLI via subprocess and resume existing sessions."""
 
     def __init__(self, timeout_seconds: float = 600.0) -> None:
         self._close_wait_seconds = 2.0
-        self._sessions: dict[str, str] = {}  # model_id -> codex session id
+        self._sessions: dict[str, str] = {}  # model_id -> gemini session id
         self._timeout_seconds = timeout_seconds
         self._procs: set[asyncio.subprocess.Process] = set()
 
     async def create_session(self, model_id: str) -> str:
         """Create a local placeholder session id."""
-        sid = uuid.uuid4().hex[:12]
-        self._sessions.setdefault(model_id, sid)
-        return sid
+        return uuid.uuid4().hex[:12]
 
     async def send_prompt(
         self, client_session_id: str, model_id: str, prompt: str,
         *, model_config: ModelConfig | None = None,
     ) -> TriggerResult:
-        """Run codex exec for first message, then codex exec resume for follow-ups."""
-        session_id = self._sessions.get(model_id, "")
-        if self._looks_like_uuid(session_id):
+        """Run gemini prompt, resuming with -r when a session id is known."""
+        base_args = [
+            "gemini",
+            "--approval-mode",
+            "default",
+            "--allowed-tools",
+            "run_shell_command(curl)",
+        ]
+        if model_config and model_config.model_id:
+            base_args.extend(["--model", model_config.model_id])
+        resume_session = self._sessions.get(model_id, "")
+        if resume_session:
             args = [
-                "codex", "exec",
-                "--skip-git-repo-check",
-                "resume", session_id,
-                "--full-auto",
-                "-c", "sandbox_workspace_write.network_access=true",
+                *base_args,
+                "-r",
+                resume_session,
+                "-p",
                 prompt,
+                "--output-format",
+                "json",
             ]
         else:
             args = [
-                "codex", "exec",
-                "--skip-git-repo-check",
-                "--full-auto",
-                "--json",
-                "-c", "sandbox_workspace_write.network_access=true",
+                *base_args,
+                "-p",
+                prompt,
+                "--output-format",
+                "json",
             ]
-            if model_config and model_config.model_id:
-                args.extend(["--model", model_config.model_id])
-            args.append(prompt)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -78,13 +84,13 @@ class CodexTrigger(TriggerEngine):
                         )
                     return TriggerResult(
                         success=False,
-                        error=f"codex CLI timed out after {int(self._timeout_seconds)}s",
+                        error=f"gemini CLI timed out after {int(self._timeout_seconds)}s",
                         client_session_id=client_session_id,
                     )
 
                 output = stdout.decode().strip()
                 error = stderr.decode().strip()
-                if proc.returncode == 0 and not self._looks_like_uuid(session_id):
+                if proc.returncode == 0 and not resume_session:
                     extracted = self._extract_session_id(output)
                     if extracted:
                         self._sessions[model_id] = extracted
@@ -100,7 +106,7 @@ class CodexTrigger(TriggerEngine):
         except FileNotFoundError:
             return TriggerResult(
                 success=False,
-                error="codex CLI not found. Install Codex CLI first.",
+                error="gemini CLI not found. Install Gemini CLI first.",
                 client_session_id=client_session_id,
             )
         except Exception as e:
@@ -141,15 +147,36 @@ class CodexTrigger(TriggerEngine):
         self._sessions.clear()
 
     @staticmethod
-    def _looks_like_uuid(value: str) -> bool:
-        return bool(re.fullmatch(r"[0-9a-fA-F-]{32,36}", value or ""))
+    def _extract_session_id(output: str) -> str:
+        """Best-effort extraction from JSON output or free text."""
+        try:
+            obj = json.loads(output)
+            sid = GeminiTrigger._find_session_id_in_json(obj)
+            if sid:
+                return sid
+        except Exception:
+            pass
+
+        # Fallback: UUID-like token in output
+        m = re.search(r"\b([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})\b", output or "")
+        if m:
+            return m.group(1)
+        return ""
 
     @staticmethod
-    def _extract_session_id(output: str) -> str:
-        m = re.search(r'"session_id"\s*:\s*"([0-9a-fA-F-]{32,36})"', output)
-        if m:
-            return m.group(1)
-        m = re.search(r"\b([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})\b", output)
-        if m:
-            return m.group(1)
+    def _find_session_id_in_json(obj: Any) -> str:
+        if isinstance(obj, dict):
+            for k in ("session_id", "sessionId", "session", "id"):
+                v = obj.get(k)
+                if isinstance(v, str) and re.fullmatch(r"[0-9a-fA-F-]{8,64}", v):
+                    return v
+            for v in obj.values():
+                sid = GeminiTrigger._find_session_id_in_json(v)
+                if sid:
+                    return sid
+        elif isinstance(obj, list):
+            for v in obj:
+                sid = GeminiTrigger._find_session_id_in_json(v)
+                if sid:
+                    return sid
         return ""

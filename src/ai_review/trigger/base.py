@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_review.models import ModelConfig
 
 
 @dataclass
@@ -24,7 +28,8 @@ class TriggerEngine(abc.ABC):
 
     @abc.abstractmethod
     async def send_prompt(
-        self, client_session_id: str, model_id: str, prompt: str
+        self, client_session_id: str, model_id: str, prompt: str,
+        *, model_config: ModelConfig | None = None,
     ) -> TriggerResult:
         """Send a prompt to the client and wait for completion."""
         ...

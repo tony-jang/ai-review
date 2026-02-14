@@ -1,6 +1,7 @@
 """Tests for ClaudeCodeTrigger."""
 
-from unittest.mock import AsyncMock, patch
+import asyncio
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -90,3 +91,20 @@ class TestSendPrompt:
         assert result.error == "error occurred"
 
         await trigger.close()
+
+
+class TestClose:
+    @pytest.mark.asyncio
+    async def test_close_kills_stuck_process(self):
+        trigger = ClaudeCodeTrigger()
+        proc = AsyncMock()
+        proc.returncode = None
+        proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), asyncio.TimeoutError()])
+        proc.terminate = Mock()
+        proc.kill = Mock()
+        trigger._procs.add(proc)
+
+        await trigger.close()
+
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()

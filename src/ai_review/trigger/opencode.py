@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import httpx
 
 from ai_review.trigger.base import TriggerEngine, TriggerResult
+
+if TYPE_CHECKING:
+    from ai_review.models import ModelConfig
 
 
 class OpenCodeTrigger(TriggerEngine):
@@ -36,12 +41,20 @@ class OpenCodeTrigger(TriggerEngine):
         model_id: str,
         prompt: str,
         *,
+        model_config: ModelConfig | None = None,
         provider: str = "",
         model_spec: str = "",
         agent: str = "",
         async_mode: bool = False,
     ) -> TriggerResult:
         """Send a prompt to OpenCode Serve session."""
+        # Extract provider/model from model_config if not explicitly provided
+        if model_config:
+            if not provider and model_config.provider:
+                provider = model_config.provider
+            if not model_spec and model_config.model_id:
+                model_spec = model_config.model_id
+
         body: dict = {
             "parts": [{"type": "text", "text": prompt}],
         }
