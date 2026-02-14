@@ -132,6 +132,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   opacity: 0.8;
   transition: opacity 0.3s;
 }
+.reviewer-timeline { padding: 4px 8px 6px 24px; border-top: 1px solid var(--border); max-height: 120px; overflow-y: auto; }
+.timeline-entry { font-size: 11px; color: var(--text-muted); padding: 2px 0; display: flex; gap: 6px; align-items: baseline; }
+.timeline-entry .timeline-time { flex-shrink: 0; font-size: 10px; font-family: 'SF Mono', Monaco, monospace; opacity: 0.7; min-width: 40px; }
+.timeline-entry .timeline-action { font-weight: 500; color: var(--text); }
+.timeline-entry .timeline-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-agent-dots { display: inline-flex; gap: 2px; margin-left: 4px; vertical-align: middle; }
+.file-agent-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.activity-stats { font-size: 11px; color: var(--text-muted); padding: 0 4px; }
 @media (max-width: 1200px) {
   .right-main-layout { flex-direction: column; }
   .right-side-splitter { display: none; }
@@ -2283,7 +2291,7 @@ function _renderFileTreeNode(node, depth) {
     return `<div class="file-tree-row file-tree-file${activeClass}" style="--depth:${depth}" data-path="${_escapeAttr(filePath)}" data-full-path="${_escapeAttr(filePath)}" data-kind="file" onclick="onFileTreeFileClick(this)" oncontextmenu="onFileTreeFileContextMenu(event, this)" onmouseenter="onFileTreeRowEnter(event,this)" onmousemove="onFileTreeRowMove(event)" onmouseleave="onFileTreeRowLeave()">
       <span class="file-tree-twist"></span>
       <span class="file-tree-status ${statusMeta.key}" title="${_escapeAttr(statusMeta.label)}">${statusMeta.icon}</span>
-      <span class="file-tree-label">${esc(node.name)}</span>
+      <span class="file-tree-label">${esc(node.name)}</span>${_getFileAgentDots(filePath)}
     </div>`;
   }
 
@@ -2720,6 +2728,7 @@ function _onAgentActivity(data) {
     _agentActivities[model_id].history.pop();
   }
   _updateAgentActivityUI(model_id);
+  updateSummary();
 }
 
 function _formatActivityTarget(action, target) {
@@ -2748,6 +2757,49 @@ function _updateAgentActivityUI(modelId) {
     el.textContent = '';
     el.style.display = 'none';
   }, ACTIVITY_STALE_MS);
+}
+
+function _renderActivityTimeline(modelId) {
+  const info = _agentActivities[modelId];
+  if (!info || !info.history.length) return '';
+  const rows = info.history.slice(0, 15).map(e => {
+    const label = ACTIVITY_LABELS[e.action] || e.action;
+    const target = _formatActivityTarget(e.action, e.target);
+    const short = target.length > 30 ? '...' + target.slice(-27) : target;
+    const d = new Date(e.ts);
+    const time = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+    return `<div class="timeline-entry"><span class="timeline-time">${time}</span><span class="timeline-action">${esc(label)}</span><span class="timeline-target" title="${_escapeAttr(target)}">${esc(short)}</span></div>`;
+  }).join('');
+  return `<div class="reviewer-timeline">${rows}</div>`;
+}
+
+function _getFileAgentDots(filePath) {
+  const dots = [];
+  const seen = new Set();
+  for (const [modelId, info] of Object.entries(_agentActivities)) {
+    if (seen.has(modelId)) continue;
+    const visited = info.history.some(e =>
+      (e.action === 'view_file' || e.action === 'view_diff') && e.target.includes(filePath)
+    );
+    if (visited) {
+      seen.add(modelId);
+      dots.push(`<span class="file-agent-dot" style="background:${getModelColor(modelId)}" title="${_escapeAttr(modelId)}"></span>`);
+    }
+  }
+  return dots.length ? `<span class="file-agent-dots">${dots.join('')}</span>` : '';
+}
+
+function _getActivityStats() {
+  let totalCalls = 0, filesViewed = new Set(), searches = 0;
+  for (const info of Object.values(_agentActivities)) {
+    for (const e of info.history) {
+      totalCalls++;
+      if (e.action === 'view_file' || e.action === 'view_diff') filesViewed.add(e.target);
+      if (e.action === 'search') searches++;
+    }
+  }
+  if (!totalCalls) return '';
+  return `<span class="activity-stats">API ${totalCalls}회 · 파일 ${filesViewed.size}개 · 검색 ${searches}회</span>`;
 }
 
 function renderAgentPanel() {
@@ -2838,7 +2890,7 @@ function renderAgentPanel() {
         </div>
         <div class="reviewer-activity" data-activity-model="${_escapeAttr(modelId)}" style="display:none"></div>
       </div>
-      ${expanded ? `<div class="reviewer-issues">${issuesHtml}</div>` : ''}
+      ${expanded ? `<div class="reviewer-issues">${issuesHtml}</div>${_renderActivityTimeline(modelId)}` : ''}
     </div>`;
   }).join('');
 
@@ -3392,8 +3444,10 @@ function updateSummary() {
   const t = state.issues.length;
   const c = state.issues.filter(i=>i.consensus===true).length;
   const d = state.issues.filter(i=>(i.final_severity||i.severity)==='dismissed').length;
-  if (!t) { el.textContent='준비 완료'; return; }
-  el.textContent = `이슈 ${t}개 \u00B7 합의 ${c}개 \u00B7 기각 ${d}개`;
+  const stats = _getActivityStats();
+  if (!t && !stats) { el.textContent='준비 완료'; return; }
+  const issuePart = t ? `이슈 ${t}개 \u00B7 합의 ${c}개 \u00B7 기각 ${d}개` : '준비 완료';
+  el.innerHTML = stats ? `${esc(issuePart)} ${stats}` : esc(issuePart);
 }
 
 function selectIssue(id) {
