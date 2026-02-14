@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import typer
 import uvicorn
 
@@ -16,6 +18,18 @@ def start(
 ) -> None:
     """Start the AI Review server."""
     from pathlib import Path
+
+    # Suppress known deprecation warnings from uvicorn/websockets legacy adapter.
+    warnings.filterwarnings(
+        "ignore",
+        category=DeprecationWarning,
+        module=r"websockets(\.|$)",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        category=DeprecationWarning,
+        module=r"uvicorn\.protocols\.websockets\.websockets_impl",
+    )
 
     repo_path = str(Path(repo).resolve())
 
