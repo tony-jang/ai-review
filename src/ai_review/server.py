@@ -57,6 +57,7 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         await orchestrator.close()
 
     app = FastAPI(title="AI Review", version="0.1.0", lifespan=lifespan)
+    app.state.manager = manager
 
     # ------------------------------------------------------------------
     # Helper: resolve session from current or raise 404

@@ -791,3 +791,94 @@ class TestServerOrchestrator:
 
         status = (await client.get(f"/api/sessions/{sid}/status")).json()
         assert status["status"] == "deliberating"
+
+    # ------------------------------------------------------------------
+    # C5: git, diff, process, report endpoint tests
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_git_validate_with_tmp_path(self, client, tmp_path):
+        resp = await client.post("/api/git/validate", json={"path": str(tmp_path)})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "valid" in data
+
+    @pytest.mark.asyncio
+    async def test_git_validate_missing_path(self, client):
+        resp = await client.post("/api/git/validate", json={"path": ""})
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_git_branches(self, client, tmp_path):
+        resp = await client.get(f"/api/git/branches?repo_path={tmp_path}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, (list, dict))
+
+    @pytest.mark.asyncio
+    async def test_diff_not_found(self, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+        resp = await client.get(f"/api/sessions/{sid}/diff/nonexistent.py")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_diff_found(self, app, client):
+        from ai_review.models import DiffFile
+
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        session.diff.append(DiffFile(path="hello.py", additions=3, deletions=1, content="+new line"))
+
+        resp = await client.get(f"/api/sessions/{sid}/diff/hello.py")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["path"] == "hello.py"
+        assert data["content"] == "+new line"
+        assert data["additions"] == 3
+
+    @pytest.mark.asyncio
+    async def test_process_creates_issues(self, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "m1",
+            "issues": [
+                {"title": "Issue A", "severity": "high", "file": "a.py", "description": "d1"},
+                {"title": "Issue B", "severity": "low", "file": "b.py", "description": "d2"},
+            ],
+        })
+
+        resp = await client.post(f"/api/sessions/{sid}/process")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["raw_issues"] == 2
+        assert data["after_dedup"] == 2
+        assert len(data["issues"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_report_after_finish(self, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "m1",
+            "issues": [{"title": "Bug", "severity": "medium", "file": "x.py", "description": "d"}],
+        })
+        await client.post(f"/api/sessions/{sid}/process")
+        await client.post(f"/api/sessions/{sid}/finish")
+
+        resp = await client.get(f"/api/sessions/{sid}/report")
+        assert resp.status_code == 200
+        report = resp.json()
+        assert "stats" in report
+        assert report["stats"]["total_issues_found"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_report_nonexistent_session(self, client):
+        resp = await client.get("/api/sessions/nonexistent-id/report")
+        assert resp.status_code == 404
