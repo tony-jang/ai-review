@@ -31,6 +31,7 @@ class Orchestrator:
         self.manager = manager
         self.api_base_url = api_base_url
         self._close_timeout_seconds = 5.0
+        self._trigger_retry_delays: list[float] = [1.0, 2.0]
         # Session-scoped: session_id -> model_id -> engine
         self._triggers: dict[str, dict[str, TriggerEngine]] = {}
         # Session-scoped: session_id -> list of tasks
@@ -525,9 +526,36 @@ class Orchestrator:
         self, session_id: str, trigger: TriggerEngine, client_session_id: str, model_id: str, prompt: str,
         *, model_config: "ModelConfig | None" = None,
     ) -> None:
-        """Fire a trigger and log the result (fire-and-forget wrapper)."""
-        try:
-            result = await trigger.send_prompt(client_session_id, model_id, prompt, model_config=model_config)
+        """Fire a trigger and log the result (fire-and-forget wrapper).
+
+        On transient ``Exception``, retries up to ``len(_trigger_retry_delays)``
+        times with exponential back-off.  ``CancelledError`` and
+        ``TriggerResult(success=False)`` are **not** retried.
+        """
+        attempts = [0.0, *self._trigger_retry_delays]  # first attempt + retries
+        last_exc: Exception | None = None
+
+        for attempt_idx, delay in enumerate(attempts):
+            if delay:
+                await asyncio.sleep(delay)
+
+            try:
+                result = await trigger.send_prompt(client_session_id, model_id, prompt, model_config=model_config)
+            except asyncio.CancelledError:
+                logger.debug("Trigger %s cancelled", model_id)
+                self._mark_agent_failed(session_id, model_id, "cancelled")
+                return
+            except Exception as exc:
+                last_exc = exc
+                remaining = len(attempts) - attempt_idx - 1
+                if remaining > 0:
+                    logger.warning("Trigger %s attempt %d failed (%s), %d retries left", model_id, attempt_idx + 1, exc, remaining)
+                    continue
+                logger.exception("Trigger %s unexpected error (attempts exhausted)", model_id)
+                self._mark_agent_failed(session_id, model_id, str(exc))
+                return
+
+            # send_prompt returned a TriggerResult
             if session_id:
                 self.manager.update_agent_runtime(
                     session_id,
@@ -543,14 +571,7 @@ class Orchestrator:
                 logger.warning("Trigger %s failed: %s", model_id, result.error)
                 self._mark_agent_failed(session_id, model_id, result.error or "trigger failed")
                 return
-        except asyncio.CancelledError:
-            logger.debug("Trigger %s cancelled", model_id)
-            self._mark_agent_failed(session_id, model_id, "cancelled")
-            return
-        except Exception as exc:
-            logger.exception("Trigger %s unexpected error", model_id)
-            self._mark_agent_failed(session_id, model_id, str(exc))
-            return
+            break  # success — exit retry loop
 
         # Trigger completed "successfully" but no review was actually submitted
         # (e.g. sandbox blocked network access). Mark as failed.

@@ -156,10 +156,15 @@ class ModelConfig(BaseModel):
 
 
 class AgentStatus(str, enum.Enum):
-    WAITING = "waiting"
-    REVIEWING = "reviewing"
-    SUBMITTED = "submitted"
-    FAILED = "failed"
+    """Status of an AI agent within a review session.
+
+    Lifecycle: REVIEWING -> SUBMITTED | FAILED | WAITING
+    """
+
+    WAITING = "waiting"       # Deliberation round: opinion not yet submitted (non-fatal)
+    REVIEWING = "reviewing"   # Actively processing a review or deliberation prompt
+    SUBMITTED = "submitted"   # Successfully submitted review or opinion
+    FAILED = "failed"         # Error or completed without submitting
 
 
 class AgentTaskType(str, enum.Enum):

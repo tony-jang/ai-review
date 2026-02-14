@@ -628,10 +628,7 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
 
     @app.delete("/api/sessions/{session_id}")
     async def api_delete_session(session_id: str):
-        try:
-            await orchestrator.stop_session(session_id)
-        except AttributeError:
-            pass  # stop_session not yet available (M3)
+        await orchestrator.stop_session(session_id)
         try:
             manager.delete_session(session_id)
             return JSONResponse({"status": "deleted", "session_id": session_id})

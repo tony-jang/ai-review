@@ -459,6 +459,7 @@ class TestAgentFailureTracking:
                 pass
 
         orch._create_trigger = lambda ct: ExplodingTrigger()
+        orch._trigger_retry_delays = []  # disable retries for this test
 
         await orch.start(session.id)
         await asyncio.sleep(0.1)
