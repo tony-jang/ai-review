@@ -74,11 +74,14 @@ class Orchestrator:
             session.client_sessions[mc.id] = client_sid
             agent_key = self.manager.ensure_agent_access_key(session_id, mc.id)
 
+            ic = session.implementation_context
+            ic_dict = ic.model_dump(mode="json") if ic else None
             prompt = build_review_prompt(
                 session_id=session_id,
                 model_config=mc,
                 api_base_url=self.api_base_url,
                 agent_key=agent_key,
+                implementation_context=ic_dict,
             )
 
             # Mark agent as reviewing
@@ -206,11 +209,14 @@ class Orchestrator:
             )
             session.agent_states[model_id].task_type = AgentTaskType.DELIBERATION
         else:
+            ic = session.implementation_context
+            ic_dict = ic.model_dump(mode="json") if ic else None
             prompt = build_review_prompt(
                 session_id=session_id,
                 model_config=mc,
                 api_base_url=self.api_base_url,
                 agent_key=agent_key,
+                implementation_context=ic_dict,
             )
             session.agent_states[model_id].task_type = AgentTaskType.REVIEW
 

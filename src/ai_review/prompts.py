@@ -29,11 +29,40 @@ STRICTNESS_INSTRUCTIONS: dict[str, str] = {
 }
 
 
+def _render_implementation_context(ic: dict) -> str:
+    """Render implementation context dict into markdown sections."""
+    sections: list[str] = ["## Implementation Context", ""]
+    if ic.get("summary"):
+        sections.extend(["### 변경 요약", ic["summary"], ""])
+    if ic.get("decisions"):
+        sections.append("### 의도적 결정")
+        for d in ic["decisions"]:
+            sections.append(f"- {d}")
+        sections.append("")
+    if ic.get("tradeoffs"):
+        sections.append("### 트레이드오프")
+        for t in ic["tradeoffs"]:
+            sections.append(f"- {t}")
+        sections.append("")
+    if ic.get("known_issues"):
+        sections.append("### 알려진 제한")
+        for k in ic["known_issues"]:
+            sections.append(f"- {k}")
+        sections.append("")
+    if ic.get("out_of_scope"):
+        sections.append("### 의도적 제외")
+        for o in ic["out_of_scope"]:
+            sections.append(f"- {o}")
+        sections.append("")
+    return "\n".join(sections)
+
+
 def build_review_prompt(
     session_id: str,
     model_config: ModelConfig,
     api_base_url: str,
     agent_key: str = "",
+    implementation_context: dict | None = None,
 ) -> str:
     """Build a prompt that instructs an LLM to perform a code review via REST API."""
     model_id = model_config.id
@@ -52,6 +81,9 @@ def build_review_prompt(
     strictness = getattr(model_config, "strictness", "balanced") or "balanced"
     if strictness in STRICTNESS_INSTRUCTIONS:
         parts.extend(["", STRICTNESS_INSTRUCTIONS[strictness]])
+
+    if implementation_context:
+        parts.extend(["", _render_implementation_context(implementation_context)])
 
     if role:
         parts.append(f"Your review focus: {role}")
@@ -114,6 +146,7 @@ def build_review_prompt(
         "- If you find no issues, you MUST still submit a review with an empty issues list and a summary.",
         "- Complete the review in a single turn.",
         "- Write all title, description, suggestion, and summary fields in Korean.",
+        "- Respect the author's stated decisions, but flag issues if they have concrete negative impact.",
         f"- Session ID: {session_id}",
     ])
     return "\n".join(parts)
