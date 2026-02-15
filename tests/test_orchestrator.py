@@ -1006,3 +1006,172 @@ class TestAgentResponseFlow:
         assert session.status == SessionStatus.COMPLETE
 
         await orch.close()
+
+
+class TestAgentResponseE2E:
+    """End-to-end tests covering full flow through agent response."""
+
+    @pytest.mark.asyncio
+    async def test_full_flow_accept(self):
+        """review → deliberation → agent_response(accept) → complete"""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        mock_trigger = MockTrigger()
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger}
+        session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
+
+        mgr.on_review_submitted = None
+        mgr.on_opinion_submitted = None
+
+        # Review
+        mgr.submit_review(session.id, "opus", [
+            {"title": "Bug A", "severity": "high", "file": "a.py", "description": "d"},
+        ])
+        mgr.submit_review(session.id, "gpt", [
+            {"title": "Bug B", "severity": "medium", "file": "b.py", "description": "d"},
+        ])
+
+        # Deliberation
+        await orch._advance_to_deliberation(session.id)
+        assert session.status == SessionStatus.DELIBERATING
+
+        # Opinions → consensus
+        for issue in session.issues:
+            for mc in models:
+                if issue.raised_by != mc.id:
+                    mgr.submit_opinion(
+                        session.id, issue.id, mc.id,
+                        "fix_required", "Confirmed", "high",
+                    )
+
+        mgr.on_issue_responded = orch._on_issue_responded
+        await orch._check_and_advance(session.id)
+        assert session.status == SessionStatus.AGENT_RESPONSE
+
+        # Accept all
+        for issue in session.issues:
+            mgr.submit_issue_response(session.id, issue.id, "accept", "Will fix")
+
+        await asyncio.sleep(0.05)
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_full_flow_dispute_and_redeliberation(self):
+        """review → deliberation → agent_response(dispute) → re-deliberation → complete"""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        mock_trigger = MockTrigger()
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger}
+        session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
+
+        mgr.on_review_submitted = None
+        mgr.on_opinion_submitted = None
+
+        mgr.submit_review(session.id, "opus", [
+            {"title": "Bug", "severity": "high", "file": "x.py", "description": "d"},
+        ])
+        mgr.submit_review(session.id, "gpt", [])
+
+        # Deliberation → consensus
+        await orch._advance_to_deliberation(session.id)
+        for issue in session.issues:
+            mgr.submit_opinion(session.id, issue.id, "gpt", "fix_required", "ok", "high")
+
+        mgr.on_issue_responded = orch._on_issue_responded
+        await orch._check_and_advance(session.id)
+        assert session.status == SessionStatus.AGENT_RESPONSE
+
+        # Dispute → re-deliberation
+        issue = session.issues[0]
+        mgr.submit_issue_response(
+            session.id, issue.id, "dispute",
+            reasoning="False positive",
+            submitted_by="coding-agent",
+        )
+        await asyncio.sleep(0.05)
+        assert session.status == SessionStatus.DELIBERATING
+        assert session.issue_responses == []
+
+        # After re-deliberation, agents re-opine. Since first votes still count,
+        # consensus may stay fix_required. Submit opinions to trigger re-check.
+        mgr.on_opinion_submitted = None
+        for i in session.issues:
+            if not i.consensus:
+                mgr.submit_opinion(session.id, i.id, "opus", "no_fix", "Retracted")
+                mgr.submit_opinion(session.id, i.id, "gpt", "no_fix", "Agreed, retracted")
+
+        await orch._check_and_advance(session.id)
+        # Consensus algorithm counts first vote per model, so fix_required persists
+        # → AGENT_RESPONSE again. Accept to complete.
+        assert session.status == SessionStatus.AGENT_RESPONSE
+
+        for i in session.issues:
+            mgr.submit_issue_response(session.id, i.id, "accept", "ok")
+
+        await asyncio.sleep(0.05)
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_no_confirmed_issues_skip_agent_response(self):
+        """When no fix_required issues, skip AGENT_RESPONSE and finish directly."""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+            ModelConfig(id="codex", client_type="codex"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        mock_trigger = MockTrigger()
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger, "codex": mock_trigger}
+        session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt", "codex": "mock-codex"}
+
+        mgr.on_review_submitted = None
+        mgr.on_opinion_submitted = None
+        mgr.on_issue_responded = None
+
+        mgr.submit_review(session.id, "opus", [
+            {"title": "Nit", "severity": "low", "file": "style.py", "description": "naming"},
+        ])
+        mgr.submit_review(session.id, "gpt", [])
+        mgr.submit_review(session.id, "codex", [])
+
+        await orch._advance_to_deliberation(session.id)
+
+        # Both say no_fix → dismissed
+        for issue in session.issues:
+            mgr.submit_opinion(session.id, issue.id, "gpt", "no_fix", "nah")
+            mgr.submit_opinion(session.id, issue.id, "codex", "no_fix", "nah")
+
+        await orch._check_and_advance(session.id)
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_backward_compat_deliberation_to_complete(self):
+        """Backward compat: finish API still works from DELIBERATING."""
+        models = [ModelConfig(id="opus", client_type="claude-code")]
+        mgr, session = _make_manager_with_config(models)
+        session.status = SessionStatus.DELIBERATING
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # No fix_required issues → _finish should go to COMPLETE
+        await orch._finish(session.id)
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()

@@ -1086,3 +1086,130 @@ class TestServerOrchestrator:
         assert resp.status_code == 200
         data = resp.json()
         assert data["total_confirmed"] == 0
+
+
+class TestAgentResponseProtocol:
+    """Integration tests for the full agent response protocol."""
+
+    async def _setup_confirmed_session(self, app, client):
+        """Create session → review → process → set consensus → AGENT_RESPONSE."""
+        from ai_review.consensus import apply_consensus
+
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        # Submit two reviews with distinct issues
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "reviewer-a",
+            "issues": [
+                {"title": "SQL injection", "severity": "critical", "file": "db.py", "description": "raw sql"},
+            ],
+        })
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "reviewer-b",
+            "issues": [
+                {"title": "Memory leak", "severity": "high", "file": "pool.py", "description": "connection not closed"},
+            ],
+        })
+
+        # Process (creates issues + dedup)
+        await client.post(f"/api/sessions/{sid}/process")
+
+        # Establish consensus (fix_required) on all issues
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        for issue in session.issues:
+            manager.submit_opinion(
+                sid, issue.id, "reviewer-a", "fix_required", "confirmed", "high",
+            )
+            manager.submit_opinion(
+                sid, issue.id, "reviewer-b", "fix_required", "confirmed", "high",
+            )
+        apply_consensus(session.issues, session.config.consensus_threshold)
+
+        # Transition to AGENT_RESPONSE
+        session.status = SessionStatus.AGENT_RESPONSE
+        manager.persist()
+        return sid, session
+
+    @pytest.mark.asyncio
+    async def test_confirmed_issues_returns_fix_required_only(self, app, client):
+        sid, session = await self._setup_confirmed_session(app, client)
+
+        resp = await client.get(f"/api/sessions/{sid}/confirmed-issues")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_confirmed"] == len(session.issues)
+        for issue in data["issues"]:
+            assert "consensus_summary" in issue
+
+    @pytest.mark.asyncio
+    async def test_accept_response(self, app, client):
+        sid, session = await self._setup_confirmed_session(app, client)
+        issue_id = session.issues[0].id
+
+        resp = await client.post(f"/api/sessions/{sid}/issues/{issue_id}/respond", json={
+            "action": "accept",
+            "reasoning": "Will fix",
+            "submitted_by": "coding-agent",
+        })
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "accepted"
+
+    @pytest.mark.asyncio
+    async def test_dispute_adds_opinion_to_thread(self, app, client):
+        sid, session = await self._setup_confirmed_session(app, client)
+        issue_id = session.issues[0].id
+
+        resp = await client.post(f"/api/sessions/{sid}/issues/{issue_id}/respond", json={
+            "action": "dispute",
+            "reasoning": "False positive",
+            "submitted_by": "coding-agent",
+        })
+        assert resp.status_code == 200
+
+        # Verify thread has new opinion
+        resp = await client.get(f"/api/sessions/{sid}/issues/{issue_id}/thread")
+        assert resp.status_code == 200
+        thread = resp.json()["thread"]
+        assert any("[DISPUTE]" in op["reasoning"] for op in thread)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_response_rejected(self, app, client):
+        sid, session = await self._setup_confirmed_session(app, client)
+        issue_id = session.issues[0].id
+
+        await client.post(f"/api/sessions/{sid}/issues/{issue_id}/respond", json={
+            "action": "accept", "reasoning": "ok",
+        })
+        resp = await client.post(f"/api/sessions/{sid}/issues/{issue_id}/respond", json={
+            "action": "accept", "reasoning": "again",
+        })
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_issue_returns_404(self, app, client):
+        sid, _ = await self._setup_confirmed_session(app, client)
+
+        resp = await client.post(f"/api/sessions/{sid}/issues/nonexistent/respond", json={
+            "action": "accept",
+        })
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_backward_compat_finish_without_agent_response(self, client):
+        """Existing finish API should still work (DELIBERATING → COMPLETE)."""
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "a",
+            "issues": [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        })
+        await client.post(f"/api/sessions/{sid}/process")
+
+        resp = await client.post(f"/api/sessions/{sid}/finish")
+        assert resp.status_code == 200
+
+        status = (await client.get(f"/api/sessions/{sid}/status")).json()
+        assert status["status"] == "complete"
