@@ -220,6 +220,19 @@ class AgentActivity(BaseModel):
     timestamp: datetime = Field(default_factory=_utcnow)
 
 
+# --- Implementation Context ---
+
+
+class ImplementationContext(BaseModel):
+    summary: str = ""
+    decisions: list[str] = Field(default_factory=list)
+    tradeoffs: list[str] = Field(default_factory=list)
+    known_issues: list[str] = Field(default_factory=list)
+    out_of_scope: list[str] = Field(default_factory=list)
+    submitted_by: str = ""
+    submitted_at: datetime | None = None
+
+
 # --- Session ---
 
 
@@ -240,5 +253,6 @@ class ReviewSession(BaseModel):
     agent_states: dict[str, AgentState] = Field(default_factory=dict)
     agent_chats: dict[str, list[AgentChatMessage]] = Field(default_factory=dict)
     agent_activities: list[AgentActivity] = Field(default_factory=list)
+    implementation_context: ImplementationContext | None = None
     config: SessionConfig = Field(default_factory=SessionConfig)
     created_at: datetime = Field(default_factory=_utcnow)

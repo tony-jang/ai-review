@@ -21,6 +21,7 @@ from ai_review.models import (
     AgentStatus,
     AgentTaskType,
     DiffFile,
+    ImplementationContext,
     Issue,
     Knowledge,
     MergeDecision,
@@ -428,8 +429,37 @@ class SessionManager:
             "truncated": total > max_results,
         }
 
+    def submit_implementation_context(self, session_id: str, data: dict) -> dict:
+        """Submit implementation context for a session.
+
+        Allowed in COLLECTING or REVIEWING states only.
+        """
+        session = self.get_session(session_id)
+        if session.status not in (SessionStatus.COLLECTING, SessionStatus.REVIEWING):
+            raise ValueError(
+                f"Cannot submit implementation context in {session.status.value} state"
+            )
+
+        ic = ImplementationContext(
+            summary=data.get("summary", ""),
+            decisions=data.get("decisions", []),
+            tradeoffs=data.get("tradeoffs", []),
+            known_issues=data.get("known_issues", []),
+            out_of_scope=data.get("out_of_scope", []),
+            submitted_by=data.get("submitted_by", ""),
+            submitted_at=_utcnow(),
+        )
+        session.implementation_context = ic
+
+        self.broker.publish("context_submitted", {
+            "session_id": session_id,
+            "submitted_by": ic.submitted_by,
+        })
+        self.persist()
+        return ic.model_dump(mode="json")
+
     def get_review_context(self, session_id: str, file: str | None = None) -> dict:
-        """Return diff + knowledge for the session."""
+        """Return diff + knowledge + implementation context for the session."""
         session = self.get_session(session_id)
 
         if file:
@@ -439,11 +469,14 @@ class SessionManager:
         else:
             diff_content = "\n".join(f.content for f in session.diff if f.content)
 
-        return {
+        result: dict = {
             "diff": diff_content,
             "knowledge": session.knowledge.model_dump(mode="json"),
             "files": [f.path for f in session.diff],
         }
+        if session.implementation_context is not None:
+            result["implementation_context"] = session.implementation_context.model_dump(mode="json")
+        return result
 
     def get_context_index(self, session_id: str) -> dict:
         """Return a lightweight index for targeted context exploration."""

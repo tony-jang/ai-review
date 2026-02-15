@@ -512,6 +512,17 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
+    @app.post("/api/sessions/{session_id}/implementation-context")
+    async def api_submit_implementation_context(session_id: str, request: Request):
+        body = await request.json()
+        try:
+            result = manager.submit_implementation_context(session_id, body)
+            return JSONResponse(result)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @app.get("/api/sessions/{session_id}/index")
     async def api_get_context_index(session_id: str, request: Request = None):
         try:
