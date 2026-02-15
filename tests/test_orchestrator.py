@@ -340,13 +340,13 @@ class TestFullCycleWithMocks:
             assert issue.consensus is True
         assert session.status == SessionStatus.AGENT_RESPONSE
 
-        # Phase 5: Accept all issues to complete
+        # Phase 5: Accept all issues → FIXING
         mgr.on_issue_responded = orch._on_issue_responded
         for issue in session.issues:
             mgr.submit_issue_response(session.id, issue.id, "accept", "Will fix")
 
         await asyncio.sleep(0.05)
-        assert session.status == SessionStatus.COMPLETE
+        assert session.status == SessionStatus.FIXING
 
 
 class SlowMockTrigger(TriggerEngine):
@@ -968,8 +968,8 @@ class TestAgentResponseFlow:
         await orch.close()
 
     @pytest.mark.asyncio
-    async def test_all_accept_triggers_complete(self):
-        """All accept responses should transition to COMPLETE."""
+    async def test_all_accept_triggers_fixing(self):
+        """All accept responses should transition to FIXING."""
         models = [
             ModelConfig(id="opus", client_type="claude-code"),
             ModelConfig(id="gpt", client_type="claude-code"),
@@ -998,12 +998,12 @@ class TestAgentResponseFlow:
         await orch._check_and_advance(session.id)
         assert session.status == SessionStatus.AGENT_RESPONSE
 
-        # Accept the issue
+        # Accept the issue → FIXING
         issue = session.issues[0]
         mgr.submit_issue_response(session.id, issue.id, "accept", "Will fix")
 
         await asyncio.sleep(0.05)
-        assert session.status == SessionStatus.COMPLETE
+        assert session.status == SessionStatus.FIXING
 
         await orch.close()
 
@@ -1012,8 +1012,8 @@ class TestAgentResponseE2E:
     """End-to-end tests covering full flow through agent response."""
 
     @pytest.mark.asyncio
-    async def test_full_flow_accept(self):
-        """review → deliberation → agent_response(accept) → complete"""
+    async def test_full_flow_accept_to_fixing(self):
+        """review → deliberation → agent_response(accept) → fixing"""
         models = [
             ModelConfig(id="opus", client_type="claude-code"),
             ModelConfig(id="gpt", client_type="claude-code"),
@@ -1053,12 +1053,12 @@ class TestAgentResponseE2E:
         await orch._check_and_advance(session.id)
         assert session.status == SessionStatus.AGENT_RESPONSE
 
-        # Accept all
+        # Accept all → FIXING
         for issue in session.issues:
             mgr.submit_issue_response(session.id, issue.id, "accept", "Will fix")
 
         await asyncio.sleep(0.05)
-        assert session.status == SessionStatus.COMPLETE
+        assert session.status == SessionStatus.FIXING
 
         await orch.close()
 
@@ -1121,7 +1121,7 @@ class TestAgentResponseE2E:
             mgr.submit_issue_response(session.id, i.id, "accept", "ok")
 
         await asyncio.sleep(0.05)
-        assert session.status == SessionStatus.COMPLETE
+        assert session.status == SessionStatus.FIXING
 
         await orch.close()
 
@@ -1175,3 +1175,274 @@ class TestAgentResponseE2E:
         assert session.status == SessionStatus.COMPLETE
 
         await orch.close()
+
+
+class TestFixCompletedCallback:
+    def test_on_fix_completed_registered(self):
+        mgr = SessionManager(repo_path=None)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+        assert mgr.on_fix_completed is not None
+
+    @pytest.mark.asyncio
+    async def test_on_fix_completed_detached_on_close(self):
+        mgr = SessionManager(repo_path=None)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+        await orch.close()
+        assert mgr.on_fix_completed is None
+
+
+class TestVerificationFlow:
+    """Tests for the FIXING → VERIFYING → COMPLETE/FIXING loop."""
+
+    @pytest.mark.asyncio
+    async def test_agent_response_to_fixing_transition(self):
+        """All accept responses should transition to FIXING."""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        mock_trigger = MockTrigger()
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger}
+        session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
+
+        mgr.on_review_submitted = None
+        mgr.on_opinion_submitted = None
+
+        mgr.submit_review(session.id, "opus", [
+            {"title": "Bug", "severity": "high", "file": "x.py", "description": "d"},
+        ])
+        mgr.submit_review(session.id, "gpt", [])
+
+        await orch._advance_to_deliberation(session.id)
+
+        for issue in session.issues:
+            mgr.submit_opinion(session.id, issue.id, "gpt", "fix_required", "ok", "high")
+
+        mgr.on_issue_responded = orch._on_issue_responded
+        await orch._check_and_advance(session.id)
+        assert session.status == SessionStatus.AGENT_RESPONSE
+
+        issue = session.issues[0]
+        mgr.submit_issue_response(session.id, issue.id, "accept", "Will fix")
+
+        await asyncio.sleep(0.05)
+        assert session.status == SessionStatus.FIXING
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_verification_all_resolved_then_complete(self):
+        """All no_fix opinions → COMPLETE."""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        session.status = SessionStatus.VERIFYING
+        session.verification_round = 1
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # Create a confirmed issue at turn 1
+        from ai_review.models import Issue, Opinion, Severity
+        issue = Issue(
+            title="Bug", severity=Severity.HIGH, file="x.py",
+            description="d", consensus=True, consensus_type="fix_required", turn=1,
+        )
+        session.issues.append(issue)
+
+        # Set agent states as done (WAITING, not REVIEWING)
+        session.agent_states["opus"] = AgentState(
+            model_id="opus", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+        session.agent_states["gpt"] = AgentState(
+            model_id="gpt", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+
+        # Both say no_fix (= resolved)
+        mgr.on_opinion_submitted = None
+        mgr.submit_opinion(session.id, issue.id, "opus", "no_fix", "Fixed correctly")
+        mgr.submit_opinion(session.id, issue.id, "gpt", "no_fix", "Looks good")
+
+        await orch._check_verification_complete(session.id)
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_verification_some_unresolved_then_fixing(self):
+        """Some fix_required opinions → back to FIXING."""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        session.status = SessionStatus.VERIFYING
+        session.verification_round = 1
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        from ai_review.models import Issue, Severity
+        issue = Issue(
+            title="Bug", severity=Severity.HIGH, file="x.py",
+            description="d", consensus=True, consensus_type="fix_required", turn=1,
+        )
+        session.issues.append(issue)
+
+        session.agent_states["opus"] = AgentState(
+            model_id="opus", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+        session.agent_states["gpt"] = AgentState(
+            model_id="gpt", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+
+        mgr.on_opinion_submitted = None
+        mgr.submit_opinion(session.id, issue.id, "opus", "fix_required", "Still broken")
+        mgr.submit_opinion(session.id, issue.id, "gpt", "no_fix", "Looks ok to me")
+
+        await orch._check_verification_complete(session.id)
+        assert session.status == SessionStatus.FIXING
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_max_verification_rounds_force_complete(self):
+        """When max_verification_rounds is exceeded, force COMPLETE."""
+        models = [ModelConfig(id="opus", client_type="claude-code")]
+        mgr, session = _make_manager_with_config(models)
+        session.config.max_verification_rounds = 1
+        session.status = SessionStatus.VERIFYING
+        session.verification_round = 1
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        from ai_review.models import Issue, Severity
+        issue = Issue(
+            title="Bug", severity=Severity.HIGH, file="x.py",
+            description="d", consensus=True, consensus_type="fix_required", turn=1,
+        )
+        session.issues.append(issue)
+
+        session.agent_states["opus"] = AgentState(
+            model_id="opus", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+
+        mgr.on_opinion_submitted = None
+        mgr.submit_opinion(session.id, issue.id, "opus", "fix_required", "Still broken")
+
+        await orch._check_verification_complete(session.id)
+        # Max rounds reached → force COMPLETE despite unresolved issues
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_backward_compat_agent_response_to_complete(self):
+        """When FIXING transition is blocked, fall back to COMPLETE."""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        mock_trigger = MockTrigger()
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger}
+        session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
+
+        mgr.on_review_submitted = None
+        mgr.on_opinion_submitted = None
+
+        mgr.submit_review(session.id, "opus", [
+            {"title": "Bug", "severity": "high", "file": "x.py", "description": "d"},
+        ])
+        mgr.submit_review(session.id, "gpt", [])
+
+        await orch._advance_to_deliberation(session.id)
+
+        for issue in session.issues:
+            mgr.submit_opinion(session.id, issue.id, "gpt", "fix_required", "ok", "high")
+
+        await orch._check_and_advance(session.id)
+        assert session.status == SessionStatus.AGENT_RESPONSE
+
+        # Block FIXING transition by monkeypatching
+        import ai_review.orchestrator as orch_mod
+        original_can = orch_mod.can_transition
+
+        def fake_can(session, to):
+            if to == SessionStatus.FIXING:
+                return False
+            return original_can(session, to)
+
+        orch_mod.can_transition = fake_can
+        mgr.on_issue_responded = orch._on_issue_responded
+        try:
+            issue = session.issues[0]
+            mgr.submit_issue_response(session.id, issue.id, "accept", "Will fix")
+            await asyncio.sleep(0.05)
+            assert session.status == SessionStatus.COMPLETE
+        finally:
+            orch_mod.can_transition = original_can
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_start_verification_sends_prompts(self):
+        """_start_verification should fire triggers for all enabled models."""
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        session.status = SessionStatus.VERIFYING
+        session.verification_round = 1
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        mock_trigger = MockTrigger()
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger}
+        session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
+        session.agent_states["opus"] = AgentState(model_id="opus")
+        session.agent_states["gpt"] = AgentState(model_id="gpt")
+
+        await orch._start_verification(session.id)
+        await asyncio.sleep(0.05)
+
+        # Both agents should be in VERIFICATION task type
+        assert session.agent_states["opus"].task_type == AgentTaskType.VERIFICATION
+        assert session.agent_states["gpt"].task_type == AgentTaskType.VERIFICATION
+        assert len(mock_trigger.sent_prompts) >= 2
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_verification_agents_still_reviewing_waits(self):
+        """_check_verification_complete should wait if agents are still REVIEWING."""
+        models = [ModelConfig(id="opus", client_type="claude-code")]
+        mgr, session = _make_manager_with_config(models)
+        session.status = SessionStatus.VERIFYING
+        session.verification_round = 1
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        from ai_review.models import Issue, Severity
+        issue = Issue(
+            title="Bug", severity=Severity.HIGH, file="x.py",
+            description="d", consensus=True, consensus_type="fix_required", turn=1,
+        )
+        session.issues.append(issue)
+
+        # Agent still REVIEWING
+        session.agent_states["opus"] = AgentState(
+            model_id="opus", status=AgentStatus.REVIEWING, task_type=AgentTaskType.VERIFICATION,
+        )
+
+        mgr.on_opinion_submitted = None
+        mgr.submit_opinion(session.id, issue.id, "opus", "no_fix", "Fixed")
+
+        await orch._check_verification_complete(session.id)
+        # Should NOT advance — agent still reviewing
+        assert session.status == SessionStatus.VERIFYING
+
+        await orch.close()
+
+

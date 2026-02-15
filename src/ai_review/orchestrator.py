@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 from ai_review.consensus import apply_consensus
 from ai_review.dedup import deduplicate_issues
-from ai_review.models import AgentState, AgentStatus, AgentTaskType, IssueResponseAction, ModelConfig, SessionStatus, _utcnow
-from ai_review.prompts import build_deliberation_prompt, build_review_prompt
+from ai_review.models import AgentState, AgentStatus, AgentTaskType, IssueResponseAction, ModelConfig, OpinionAction, SessionStatus, _utcnow
+from ai_review.prompts import build_deliberation_prompt, build_review_prompt, build_verification_prompt
 from ai_review.state import can_transition, transition
 from ai_review.trigger.base import TriggerEngine
 from ai_review.trigger.cc import ClaudeCodeTrigger
@@ -41,6 +41,7 @@ class Orchestrator:
         manager.on_review_submitted = self._on_review_submitted
         manager.on_opinion_submitted = self._on_opinion_submitted
         manager.on_issue_responded = self._on_issue_responded
+        manager.on_fix_completed = self._on_fix_completed
 
     # --- Public API ---
 
@@ -148,6 +149,7 @@ class Orchestrator:
         self.manager.on_review_submitted = None
         self.manager.on_opinion_submitted = None
         self.manager.on_issue_responded = None
+        self.manager.on_fix_completed = None
         self.manager.persist()
 
     async def stop_session(self, session_id: str) -> None:
@@ -326,6 +328,12 @@ class Orchestrator:
         human_like = {"human", "human-assist"}
         if model_id not in human_like:
             self.manager.update_agent_runtime(session_id, model_id, reason=f"opinion submitted for {issue_id}")
+
+        session = self.manager.get_session(session_id)
+        if session.status == SessionStatus.VERIFYING:
+            asyncio.ensure_future(self._check_verification_complete(session_id))
+            return
+
         if model_id in human_like:
             # Human comment opens a new turn on the issue. Re-trigger pending agents immediately.
             asyncio.ensure_future(self._trigger_deliberation_round(session_id))
@@ -351,17 +359,142 @@ class Orchestrator:
         await self._trigger_deliberation_round(session_id)
 
     async def _check_all_responses_complete(self, session_id: str) -> None:
-        """Check if all confirmed issues have been responded to. If so, finish."""
+        """Check if all confirmed issues have been responded to. Transition to FIXING or finish."""
         status = self.manager.get_issue_response_status(session_id)
-        if status["all_responded"]:
-            # Check for any disputes
-            session = self.manager.get_session(session_id)
-            has_dispute = any(
-                r.action == IssueResponseAction.DISPUTE
-                for r in session.issue_responses
+        if not status["all_responded"]:
+            return
+        session = self.manager.get_session(session_id)
+        has_dispute = any(
+            r.action == IssueResponseAction.DISPUTE
+            for r in session.issue_responses
+        )
+        if has_dispute:
+            return  # dispute triggers re-deliberation separately
+
+        # All accepted/partial → transition to FIXING
+        if can_transition(session, SessionStatus.FIXING):
+            transition(session, SessionStatus.FIXING)
+            self.manager.broker.publish(
+                "phase_change", {"status": "fixing", "session_id": session_id}
             )
-            if not has_dispute:
-                await self._finish(session_id)
+            self.manager.persist()
+            return
+
+        # Fallback: AGENT_RESPONSE → COMPLETE (backward compat)
+        await self._finish(session_id)
+
+    def _on_fix_completed(self, session_id: str) -> None:
+        """Called after a fix commit is submitted. Starts verification."""
+        asyncio.ensure_future(self._start_verification(session_id))
+
+    async def _start_verification(self, session_id: str) -> None:
+        """Send verification prompts to all enabled models for delta review."""
+        session = self.manager.get_session(session_id)
+        if session.status != SessionStatus.VERIFYING:
+            return
+
+        # Increment issue turns so verification opinions have a distinct turn
+        for issue in session.issues:
+            if issue.consensus_type == "fix_required":
+                issue.turn += 1
+
+        for mc in (m for m in session.config.models if m.enabled):
+            agent_key = self.manager.ensure_agent_access_key(session_id, mc.id)
+            prompt = build_verification_prompt(
+                session_id=session_id,
+                model_config=mc,
+                api_base_url=self.api_base_url,
+                verification_round=session.verification_round,
+                agent_key=agent_key,
+            )
+
+            # Update agent state for verification
+            if mc.id in session.agent_states:
+                session.agent_states[mc.id].status = AgentStatus.REVIEWING
+                session.agent_states[mc.id].task_type = AgentTaskType.VERIFICATION
+                session.agent_states[mc.id].started_at = _utcnow()
+                session.agent_states[mc.id].submitted_at = None
+                session.agent_states[mc.id].prompt_preview = prompt[:200]
+                session.agent_states[mc.id].prompt_full = prompt
+                self.manager.update_agent_runtime(
+                    session_id, mc.id,
+                    reason="verification trigger started",
+                    output="", error="",
+                )
+                self.manager.broker.publish("agent_status", {
+                    "session_id": session_id,
+                    "model_id": mc.id,
+                    "status": "reviewing",
+                    "task_type": "verification",
+                    "prompt_preview": prompt[:200],
+                })
+
+            session_triggers = self._triggers.get(session_id, {})
+            trigger = session_triggers.get(mc.id)
+            if not trigger:
+                continue
+
+            client_sid = session.client_sessions.get(mc.id)
+            if not client_sid:
+                client_sid = await trigger.create_session(mc.id)
+                session.client_sessions[mc.id] = client_sid
+
+            session_tasks = self._pending_tasks.setdefault(session_id, [])
+            task = asyncio.create_task(
+                self._fire_trigger(
+                    session_id, trigger, client_sid, mc.id, prompt,
+                    model_config=mc,
+                ),
+                name=f"verify-{session_id[:8]}-{mc.id}",
+            )
+            session_tasks.append(task)
+
+        self.manager.persist()
+
+    async def _check_verification_complete(self, session_id: str) -> None:
+        """Check if all verification opinions are in. Decide next state."""
+        session = self.manager.get_session(session_id)
+        if session.status != SessionStatus.VERIFYING:
+            return
+
+        # Check if all verification agents have finished (not REVIEWING)
+        enabled_ids = {m.id for m in session.config.models if m.enabled}
+        for mid in enabled_ids:
+            agent = session.agent_states.get(mid)
+            if agent and agent.task_type == AgentTaskType.VERIFICATION:
+                if agent.status == AgentStatus.REVIEWING:
+                    return  # Still working
+
+        # All agents done. Check if original issues are resolved.
+        confirmed_issues = [
+            i for i in session.issues if i.consensus_type == "fix_required"
+        ]
+        all_resolved = True
+        for issue in confirmed_issues:
+            verification_opinions = [
+                op for op in issue.thread
+                if op.turn == issue.turn and op.action != OpinionAction.RAISE
+            ]
+            if any(op.action == OpinionAction.FIX_REQUIRED for op in verification_opinions):
+                all_resolved = False
+                break
+
+        if all_resolved:
+            await self._finish(session_id)
+        elif session.verification_round >= session.config.max_verification_rounds:
+            logger.info(
+                "Max verification rounds (%d) reached — forcing complete",
+                session.config.max_verification_rounds,
+            )
+            await self._finish(session_id)
+        else:
+            # Some issues not fixed → back to FIXING for another attempt
+            if can_transition(session, SessionStatus.FIXING):
+                transition(session, SessionStatus.FIXING)
+                self.manager.broker.publish(
+                    "phase_change", {"status": "fixing", "session_id": session_id}
+                )
+            self.manager.persist()
 
     # --- Internal flow ---
 
@@ -632,9 +765,13 @@ class Orchestrator:
             session = self.manager.get_session(session_id)
             agent = session.agent_states.get(model_id)
             if agent and agent.status == AgentStatus.REVIEWING:
-                if agent.task_type == AgentTaskType.DELIBERATION:
+                if agent.task_type in (AgentTaskType.DELIBERATION, AgentTaskType.VERIFICATION):
                     logger.info("Trigger %s completed without opinion — set waiting", model_id)
-                    self._mark_agent_waiting(session_id, model_id, "deliberation pending")
+                    self._mark_agent_waiting(session_id, model_id, f"{agent.task_type.value} pending")
+                    if agent.task_type == AgentTaskType.VERIFICATION:
+                        session = self.manager.get_session(session_id)
+                        if session.status == SessionStatus.VERIFYING:
+                            asyncio.ensure_future(self._check_verification_complete(session_id))
                 else:
                     logger.warning("Trigger %s completed but no review submitted", model_id)
                     self._mark_agent_failed(session_id, model_id, "completed without submitting review")
