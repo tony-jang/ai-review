@@ -1604,3 +1604,79 @@ class TestGetDeltaContext:
         ctx = manager.get_delta_context(sid)
         assert len(ctx["original_issues"]) == 1
         assert ctx["original_issues"][0]["title"] == "Bug A"
+
+
+class TestGetActionableIssues:
+    @pytest.mark.asyncio
+    async def test_returns_only_fix_required(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_review(
+            sid, "opus",
+            [
+                {"title": "Bug A", "severity": "high", "file": "a.py", "description": "d"},
+                {"title": "Bug B", "severity": "low", "file": "b.py", "description": "d"},
+            ],
+        )
+        manager.create_issues_from_reviews(sid)
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+        session.issues[1].consensus_type = "dismissed"
+
+        result = manager.get_actionable_issues(sid)
+        assert result["total"] == 1
+        assert result["unaddressed"] == 1
+        assert result["issues"][0]["title"] == "Bug A"
+
+    @pytest.mark.asyncio
+    async def test_addressed_classification(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            await manager.submit_fix_complete(
+                sid, "def456",
+                issues_addressed=[session.issues[0].id],
+            )
+
+        result = manager.get_actionable_issues(sid)
+        addressed = [i for i in result["issues"] if i["addressed"]]
+        unaddressed = [i for i in result["issues"] if not i["addressed"]]
+        assert len(addressed) >= 1
+        assert result["unaddressed"] == len(unaddressed)
+
+    @pytest.mark.asyncio
+    async def test_by_file_grouping(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_review(
+            sid, "opus",
+            [
+                {"title": "Bug A", "severity": "high", "file": "db.py", "description": "d"},
+                {"title": "Bug B", "severity": "high", "file": "db.py", "description": "d2"},
+                {"title": "Bug C", "severity": "high", "file": "pool.py", "description": "d3"},
+            ],
+        )
+        manager.create_issues_from_reviews(sid)
+        session = manager.get_session(sid)
+        for issue in session.issues:
+            issue.consensus_type = "fix_required"
+
+        result = manager.get_actionable_issues(sid)
+        assert "db.py" in result["by_file"]
+        assert "pool.py" in result["by_file"]
+        assert len(result["by_file"]["db.py"]) == 2
+        assert len(result["by_file"]["pool.py"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_session(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        result = manager.get_actionable_issues(sid)
+        assert result["total"] == 0
+        assert result["unaddressed"] == 0
+        assert result["issues"] == []
+        assert result["by_file"] == {}

@@ -1527,6 +1527,42 @@ class SessionManager:
 
         return "\n".join(lines)
 
+    def get_actionable_issues(self, session_id: str) -> dict:
+        """Return unresolved fix_required issues grouped by file."""
+        session = self.get_session(session_id)
+
+        addressed_ids: set[str] = set()
+        for fc in session.fix_commits:
+            addressed_ids.update(fc.issues_addressed)
+
+        actionable: list[dict] = []
+        by_file: dict[str, list] = {}
+
+        for issue in session.issues:
+            if issue.consensus_type != "fix_required":
+                continue
+            entry = {
+                "id": issue.id,
+                "title": issue.title,
+                "severity": (issue.final_severity or issue.severity).value,
+                "file": issue.file,
+                "line_start": issue.line_start,
+                "line_end": issue.line_end,
+                "description": issue.description,
+                "suggestion": issue.suggestion,
+                "addressed": issue.id in addressed_ids,
+            }
+            actionable.append(entry)
+            by_file.setdefault(issue.file, []).append(entry)
+
+        return {
+            "session_id": session_id,
+            "total": len(actionable),
+            "unaddressed": len([a for a in actionable if not a["addressed"]]),
+            "issues": actionable,
+            "by_file": by_file,
+        }
+
     def _extract_mentions(self, text: str, session: ReviewSession) -> list[str]:
         """Extract @model mentions from free-form text."""
         if not text:

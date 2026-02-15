@@ -1366,3 +1366,35 @@ class TestDeltaReviewProtocol:
             "reasoning": "Properly fixed",
         })
         assert resp.status_code == 200
+
+
+class TestActionableIssuesEndpoint:
+    """Integration tests for actionable-issues endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_returns_200(self, app, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "a",
+            "issues": [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        })
+        await client.post(f"/api/sessions/{sid}/process")
+
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+
+        resp = await client.get(f"/api/sessions/{sid}/actionable-issues")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["unaddressed"] == 1
+        assert len(data["issues"]) == 1
+        assert "by_file" in data
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_session_returns_404(self, client):
+        resp = await client.get("/api/sessions/nonexistent/actionable-issues")
+        assert resp.status_code == 404

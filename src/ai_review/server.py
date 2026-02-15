@@ -1107,6 +1107,17 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         return await api_submit_assist_opinion_by_session(_require_current_session(), issue_id, request)
 
     # ------------------------------------------------------------------
+    # Actionable Issues
+    # ------------------------------------------------------------------
+
+    @app.get("/api/sessions/{session_id}/actionable-issues")
+    async def api_get_actionable_issues(session_id: str):
+        try:
+            return JSONResponse(manager.get_actionable_issues(session_id))
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    # ------------------------------------------------------------------
     # Report & SSE
     # ------------------------------------------------------------------
 
