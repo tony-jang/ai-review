@@ -239,3 +239,55 @@ def build_deliberation_prompt(
         f"- Session ID: {session_id}",
     ])
     return "\n".join(parts)
+
+
+def build_agent_response_prompt(
+    session_id: str,
+    model_config: ModelConfig,
+    api_base_url: str,
+    agent_key: str = "",
+) -> str:
+    """Build a prompt that instructs a coding agent to respond to confirmed issues."""
+    model_id = model_config.id
+    base = api_base_url
+
+    parts = [
+        f"You are a coding agent (model: {model_id}) responding to code review findings.",
+        "",
+        "## Authentication",
+        "",
+        f"- X-Agent-Key: {agent_key}",
+        "- Include this header in ALL requests (both GET and POST).",
+        "",
+        "## Instructions",
+        "",
+        "Reviewers have identified issues that require fixes. You must review each one and decide whether to accept, dispute, or partially accept.",
+        "",
+        f"1. Retrieve confirmed issues:",
+        f'   curl -H "X-Agent-Key: {agent_key}" {base}/api/sessions/{session_id}/confirmed-issues',
+        "2. For each issue, examine the issue thread and relevant source code:",
+        f'   curl -H "X-Agent-Key: {agent_key}" {base}/api/sessions/{session_id}/issues/{{issue_id}}/thread',
+        f'   curl -H "X-Agent-Key: {agent_key}" "{base}/api/sessions/{session_id}/files/{{path}}?start={{n}}&end={{n}}"',
+        f"3. Decide your response for each issue: accept, dispute, or partial.",
+        f"4. Submit your response for each issue:",
+        f"   curl -X POST {base}/api/sessions/{session_id}/issues/{{issue_id}}/respond \\",
+        f'     -H "Content-Type: application/json" \\',
+        f'     -H "X-Agent-Key: {agent_key}" \\',
+        f'     -d \'{{"action": "accept|dispute|partial", "reasoning": "...", "proposed_change": "...", "submitted_by": "{model_id}"}}\'',
+        "",
+        "## Response Guidelines",
+        "",
+        "- **accept**: You agree with the finding and will implement the fix.",
+        "- **dispute**: You disagree with the finding. Provide strong evidence why this is not a real issue.",
+        "  - A dispute triggers re-deliberation: all reviewers will re-examine the issue with your reasoning.",
+        "- **partial**: You partially agree. Describe what you will fix and what you won't.",
+        "",
+        "## Important",
+        "",
+        "- You MUST respond to ALL confirmed issues.",
+        "- Use dispute only when you have strong technical justification.",
+        "- Do NOT use local tools (git, sed, rg, cat, etc). Use only the APIs above.",
+        "- Write all reasoning in Korean.",
+        f"- Session ID: {session_id}",
+    ]
+    return "\n".join(parts)

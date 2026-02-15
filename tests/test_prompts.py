@@ -1,7 +1,7 @@
 """Tests for prompt templates."""
 
 from ai_review.models import ModelConfig
-from ai_review.prompts import build_deliberation_prompt, build_review_prompt
+from ai_review.prompts import build_agent_response_prompt, build_deliberation_prompt, build_review_prompt
 
 
 def _mc(id: str = "opus", role: str = "", **kwargs) -> ModelConfig:
@@ -195,3 +195,47 @@ class TestBuildDeliberationPrompt:
         assert "confidence" in prompt
         assert "0.0" in prompt or "0.5" in prompt
         assert "uncertain" in prompt.lower() or "speculative" in prompt.lower()
+
+
+class TestBuildAgentResponsePrompt:
+    def test_contains_model_id(self):
+        prompt = build_agent_response_prompt("sess1", _mc("coding-agent"), "http://localhost:3000")
+        assert "coding-agent" in prompt
+
+    def test_contains_session_id(self):
+        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "sess1" in prompt
+
+    def test_contains_confirmed_issues_api(self):
+        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/api/sessions/sess1/confirmed-issues" in prompt
+
+    def test_contains_respond_api(self):
+        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/respond" in prompt
+
+    def test_contains_accept_dispute_partial(self):
+        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "accept" in prompt
+        assert "dispute" in prompt
+        assert "partial" in prompt
+
+    def test_contains_agent_key(self):
+        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000", agent_key="k_test")
+        assert "X-Agent-Key: k_test" in prompt
+
+    def test_contains_redeliberation_guidance(self):
+        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "re-deliberation" in prompt
+
+    def test_contains_file_api(self):
+        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/files/" in prompt
+
+    def test_contains_thread_api(self):
+        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/thread" in prompt
+
+    def test_no_local_tools(self):
+        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "Do NOT use local tools" in prompt
