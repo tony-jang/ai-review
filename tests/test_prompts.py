@@ -189,3 +189,9 @@ class TestBuildDeliberationPrompt:
     def test_file_content_api_available(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
         assert "/files/" in prompt
+
+    def test_confidence_guidance_included(self):
+        prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
+        assert "confidence" in prompt
+        assert "0.0" in prompt or "0.5" in prompt
+        assert "uncertain" in prompt.lower() or "speculative" in prompt.lower()

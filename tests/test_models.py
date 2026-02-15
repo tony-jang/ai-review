@@ -117,6 +117,20 @@ class TestOpinion:
         )
         assert op.suggested_severity is None
 
+    def test_confidence_default(self):
+        op = Opinion(model_id="a", action=OpinionAction.FIX_REQUIRED, reasoning="r")
+        assert op.confidence == 1.0
+
+    def test_confidence_custom(self):
+        op = Opinion(model_id="a", action=OpinionAction.FIX_REQUIRED, reasoning="r", confidence=0.7)
+        assert op.confidence == 0.7
+
+    def test_old_opinion_json_without_confidence(self):
+        """Backward compat: old JSON without confidence deserializes as 1.0."""
+        data = {"model_id": "a", "action": "fix_required", "reasoning": "r"}
+        op = Opinion.model_validate(data)
+        assert op.confidence == 1.0
+
 
 class TestIssue:
     def test_creation(self):
@@ -129,6 +143,7 @@ class TestIssue:
         assert len(issue.id) == 12
         assert issue.thread == []
         assert issue.consensus is None
+        assert issue.consensus_type is None
         assert issue.turn == 0
 
     def test_with_thread(self):
