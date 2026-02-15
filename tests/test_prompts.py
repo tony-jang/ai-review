@@ -1,7 +1,7 @@
 """Tests for prompt templates."""
 
 from ai_review.models import ModelConfig
-from ai_review.prompts import build_agent_response_prompt, build_deliberation_prompt, build_review_prompt
+from ai_review.prompts import build_agent_response_prompt, build_deliberation_prompt, build_review_prompt, build_verification_prompt
 
 
 def _mc(id: str = "opus", role: str = "", **kwargs) -> ModelConfig:
@@ -239,3 +239,57 @@ class TestBuildAgentResponsePrompt:
     def test_no_local_tools(self):
         prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
         assert "Do NOT use local tools" in prompt
+
+
+class TestBuildVerificationPrompt:
+    def test_contains_model_id(self):
+        prompt = build_verification_prompt("sess1", _mc("opus"), "http://localhost:3000")
+        assert "opus" in prompt
+
+    def test_contains_session_id(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "sess1" in prompt
+
+    def test_contains_delta_context_api(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/api/sessions/sess1/delta-context" in prompt
+
+    def test_contains_opinions_api(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/opinions" in prompt
+
+    def test_contains_reviews_api(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/api/sessions/sess1/reviews" in prompt
+
+    def test_contains_overall_reviews_api(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/api/sessions/sess1/overall-reviews" in prompt
+        assert '"task_type":"verification"' in prompt
+
+    def test_contains_verification_round(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000", verification_round=3)
+        assert "Round 3" in prompt
+        assert '"turn":3' in prompt
+
+    def test_contains_agent_key(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000", agent_key="k_verify_123")
+        assert "X-Agent-Key: k_verify_123" in prompt
+
+    def test_contains_file_api(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "/files/" in prompt
+
+    def test_no_local_tools(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "Do NOT use local tools" in prompt
+
+    def test_system_prompt_included(self):
+        mc = _mc(system_prompt="Focus on security regressions.")
+        prompt = build_verification_prompt("sess1", mc, "http://localhost:3000")
+        assert "## System Instructions" in prompt
+        assert "security regressions" in prompt
+
+    def test_no_system_prompt_omits_section(self):
+        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "## System Instructions" not in prompt

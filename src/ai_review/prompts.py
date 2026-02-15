@@ -291,3 +291,91 @@ def build_agent_response_prompt(
         f"- Session ID: {session_id}",
     ]
     return "\n".join(parts)
+
+
+def build_verification_prompt(
+    session_id: str,
+    model_config: ModelConfig,
+    api_base_url: str,
+    verification_round: int = 1,
+    agent_key: str = "",
+) -> str:
+    """Build a prompt that instructs an LLM to verify fixes via delta diff review."""
+    model_id = model_config.id
+    system_prompt = model_config.system_prompt
+    base = api_base_url
+
+    parts = [
+        f"You are a verification reviewer (model: {model_id}). Round {verification_round}.",
+    ]
+
+    if system_prompt:
+        parts.extend(["", "## System Instructions", "", system_prompt])
+
+    strictness = getattr(model_config, "strictness", "balanced") or "balanced"
+    if strictness in STRICTNESS_INSTRUCTIONS:
+        parts.extend(["", STRICTNESS_INSTRUCTIONS[strictness]])
+
+    parts.extend([
+        "",
+        "## Authentication",
+        "",
+        f"- X-Agent-Key: {agent_key}",
+        "- Include this header in ALL requests (both GET and POST).",
+        "",
+        "## Instructions",
+        "",
+        "A coding agent has submitted fixes for previously identified issues.",
+        "Your task is to verify whether each original issue has been resolved by reviewing the delta diff.",
+        "",
+        f"1. Retrieve the delta context (changed files and original issues):",
+        f'   curl -H "X-Agent-Key: {agent_key}" {base}/api/sessions/{session_id}/delta-context',
+        f"2. Inspect delta diff details per file:",
+        f'   curl -H "X-Agent-Key: {agent_key}" "{base}/api/sessions/{session_id}/files/{{path}}?start={{n}}&end={{n}}"',
+        f"3. Review the original issue thread for context:",
+        f'   curl -H "X-Agent-Key: {agent_key}" {base}/api/sessions/{session_id}/issues/{{issue_id}}/thread',
+        f"4. Submit your opinion on each original issue:",
+        f"   curl -X POST {base}/api/sessions/{session_id}/issues/{{issue_id}}/opinions \\",
+        f'     -H "Content-Type: application/json" \\',
+        f'     -H "X-Agent-Key: {agent_key}" \\',
+        f'     -d \'{{"model_id": "{model_id}", "action": "...", "reasoning": "...", "suggested_severity": "...", "confidence": 0.8}}\'',
+        "   - action: one of fix_required/no_fix/comment",
+        "",
+        "   **IMPORTANT — action meaning in verification context:**",
+        "   - **no_fix**: The original issue has been **resolved** by the fix. No further change needed.",
+        "   - **fix_required**: The original issue is **still NOT resolved**. Further fix is needed.",
+        "   - **comment**: You have observations but are not ready to make a definitive judgment.",
+        "   - This is different from deliberation where no_fix means 'dismiss the issue'.",
+        "     Here, no_fix means 'the fix successfully addressed this issue'.",
+        "",
+        f"5. If you discover NEW issues introduced by the fix, submit a review:",
+        f"   curl -X POST {base}/api/sessions/{session_id}/reviews \\",
+        f'     -H "Content-Type: application/json" \\',
+        f'     -H "X-Agent-Key: {agent_key}" \\',
+        f'     -d \'{{"model_id": "{model_id}", "issues": [...], "summary": "..."}}\'',
+        "   - Only report issues that are NEW — caused by the fix itself.",
+        "   - Use the same issue format as initial review (title, severity, file, line_start, line_end, description, suggestion).",
+        f"6. Submit your overall verdict for this verification round:",
+        f"   curl -X POST {base}/api/sessions/{session_id}/overall-reviews \\",
+        f'     -H "Content-Type: application/json" \\',
+        f'     -H "X-Agent-Key: {agent_key}" \\',
+        f'     -d \'{{"model_id":"{model_id}","task_type":"verification","turn":{verification_round},"merge_decision":"mergeable|not_mergeable|needs_discussion","summary":"...","highlights":["..."],"blockers":["..."],"recommendations":["..."]}}\'',
+        "",
+        "## Verification Rules",
+        "",
+        "- Review ONLY the delta diff. Do NOT re-review the entire codebase.",
+        "- For each original issue, verify whether the fix actually addresses it.",
+        "- You MAY report new issues introduced by the fix (Step 5), but do not re-raise original issues that are already resolved.",
+        "- If all original issues are resolved and no new issues found, submit a clean verdict.",
+        "",
+        "## Important",
+        "",
+        "- Do NOT use local tools (git, sed, rg, cat, etc). Use only the APIs above.",
+        "- Verify independently. Do not ask for human input.",
+        "- Be specific: include file paths and line numbers.",
+        "- Only report real issues. Do not fabricate problems.",
+        "- Complete the verification in a single turn.",
+        "- Write all reasoning, description, suggestion, and summary fields in Korean.",
+        f"- Session ID: {session_id}",
+    ])
+    return "\n".join(parts)
