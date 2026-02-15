@@ -1306,3 +1306,63 @@ class TestFixCompleteProtocol:
         assert data["delta_files"] == ["db.py"]
 
 
+class TestDeltaReviewProtocol:
+    """Integration tests for delta review loop (FIXING → VERIFYING cycle)."""
+
+    async def _setup_fixing_session(self, app, client):
+        """Reuse TestFixCompleteProtocol helper."""
+        helper = TestFixCompleteProtocol()
+        return await helper._setup_fixing_session(app, client)
+
+    async def _setup_verifying_session(self, app, client):
+        """Create session in VERIFYING state via fix-complete."""
+        sid, session = await self._setup_fixing_session(app, client)
+        mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            await client.post(f"/api/sessions/{sid}/fix-complete", json={
+                "commit_hash": "fix001",
+                "submitted_by": "coding-agent",
+            })
+
+        return sid, session
+
+    @pytest.mark.asyncio
+    async def test_fix_complete_unknown_issue_id(self, app, client):
+        """Specifying a non-existent issue_id should return 404."""
+        sid, session = await self._setup_fixing_session(app, client)
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
+            resp = await client.post(f"/api/sessions/{sid}/fix-complete", json={
+                "commit_hash": "fix999",
+                "issues_addressed": ["nonexistent-id"],
+            })
+
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_submit_review_in_verifying_state(self, app, client):
+        """Reviews should be accepted in VERIFYING state (verification opinions)."""
+        sid, session = await self._setup_verifying_session(app, client)
+        assert session.status == SessionStatus.VERIFYING
+
+        resp = await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "reviewer-a",
+            "issues": [
+                {"title": "Still broken", "severity": "high", "file": "db.py", "description": "not fixed"},
+            ],
+        })
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_submit_opinion_in_verifying_state(self, app, client):
+        """Opinions should be accepted in VERIFYING state."""
+        sid, session = await self._setup_verifying_session(app, client)
+
+        issue = session.issues[0]
+        resp = await client.post(f"/api/sessions/{sid}/issues/{issue.id}/opinions", json={
+            "model_id": "reviewer-a",
+            "action": "no_fix",
+            "reasoning": "Properly fixed",
+        })
+        assert resp.status_code == 200

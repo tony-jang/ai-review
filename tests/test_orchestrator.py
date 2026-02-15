@@ -1446,3 +1446,192 @@ class TestVerificationFlow:
         await orch.close()
 
 
+class TestDeltaReviewE2E:
+    """End-to-end tests for the full delta review loop."""
+
+    @pytest.mark.asyncio
+    async def test_full_flow_accept_fix_verify_complete(self):
+        """review → delib → AGENT_RESPONSE(accept) → FIXING → VERIFYING → all no_fix → COMPLETE."""
+        from ai_review.models import Issue, Severity
+
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        mock_trigger = MockTrigger()
+        orch._triggers[session.id] = {"opus": mock_trigger, "gpt": mock_trigger}
+        session.client_sessions = {"opus": "mock-opus", "gpt": "mock-gpt"}
+
+        # Phase 1: REVIEWING → DELIBERATING → AGENT_RESPONSE
+        mgr.on_review_submitted = None
+        mgr.on_opinion_submitted = None
+
+        mgr.submit_review(session.id, "opus", [
+            {"title": "Bug", "severity": "high", "file": "x.py", "description": "d"},
+        ])
+        mgr.submit_review(session.id, "gpt", [])
+
+        await orch._advance_to_deliberation(session.id)
+
+        for issue in session.issues:
+            mgr.submit_opinion(session.id, issue.id, "gpt", "fix_required", "ok", "high")
+
+        mgr.on_issue_responded = orch._on_issue_responded
+        await orch._check_and_advance(session.id)
+        assert session.status == SessionStatus.AGENT_RESPONSE
+
+        # Phase 2: AGENT_RESPONSE → FIXING
+        issue = session.issues[0]
+        mgr.submit_issue_response(session.id, issue.id, "accept", "Will fix")
+        await asyncio.sleep(0.05)
+        assert session.status == SessionStatus.FIXING
+
+        # Phase 3: FIXING → VERIFYING (manual state transition, avoiding git)
+        session.verification_round += 1
+        session.status = SessionStatus.VERIFYING
+        for iss in session.issues:
+            if iss.consensus_type == "fix_required":
+                iss.turn += 1
+
+        session.agent_states["opus"] = AgentState(
+            model_id="opus", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+        session.agent_states["gpt"] = AgentState(
+            model_id="gpt", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+
+        # Phase 4: All no_fix → COMPLETE
+        mgr.on_opinion_submitted = None
+        mgr.submit_opinion(session.id, issue.id, "opus", "no_fix", "Fixed correctly")
+        mgr.submit_opinion(session.id, issue.id, "gpt", "no_fix", "Looks good")
+
+        await orch._check_verification_complete(session.id)
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_full_flow_fix_fail_refix_complete(self):
+        """→ VERIFYING → fix_required → FIXING → VERIFYING → no_fix → COMPLETE."""
+        from ai_review.models import Issue, Severity
+
+        models = [
+            ModelConfig(id="opus", client_type="claude-code"),
+            ModelConfig(id="gpt", client_type="claude-code"),
+        ]
+        mgr, session = _make_manager_with_config(models)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # Start at VERIFYING round 1 with a confirmed issue
+        issue = Issue(
+            title="Bug", severity=Severity.HIGH, file="x.py",
+            description="d", consensus=True, consensus_type="fix_required", turn=1,
+        )
+        session.issues.append(issue)
+        session.status = SessionStatus.VERIFYING
+        session.verification_round = 1
+
+        session.agent_states["opus"] = AgentState(
+            model_id="opus", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+        session.agent_states["gpt"] = AgentState(
+            model_id="gpt", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+
+        # Round 1: one says fix_required → back to FIXING
+        mgr.on_opinion_submitted = None
+        mgr.submit_opinion(session.id, issue.id, "opus", "fix_required", "Still broken")
+        mgr.submit_opinion(session.id, issue.id, "gpt", "no_fix", "OK for me")
+
+        await orch._check_verification_complete(session.id)
+        assert session.status == SessionStatus.FIXING
+
+        # Simulate second fix attempt → VERIFYING round 2
+        session.verification_round += 1
+        session.status = SessionStatus.VERIFYING
+        issue.turn += 1
+
+        session.agent_states["opus"] = AgentState(
+            model_id="opus", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+        session.agent_states["gpt"] = AgentState(
+            model_id="gpt", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+
+        # Round 2: all no_fix → COMPLETE
+        mgr.submit_opinion(session.id, issue.id, "opus", "no_fix", "Now fixed")
+        mgr.submit_opinion(session.id, issue.id, "gpt", "no_fix", "Good")
+
+        await orch._check_verification_complete(session.id)
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_full_flow_max_rounds_force_complete(self):
+        """verification_round > max → forced COMPLETE even with unresolved issues."""
+        from ai_review.models import Issue, Severity
+
+        models = [ModelConfig(id="opus", client_type="claude-code")]
+        mgr, session = _make_manager_with_config(models)
+        session.config.max_verification_rounds = 2
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        issue = Issue(
+            title="Bug", severity=Severity.HIGH, file="x.py",
+            description="d", consensus=True, consensus_type="fix_required", turn=1,
+        )
+        session.issues.append(issue)
+
+        # Round 1: fix_required → FIXING
+        session.status = SessionStatus.VERIFYING
+        session.verification_round = 1
+        session.agent_states["opus"] = AgentState(
+            model_id="opus", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+
+        mgr.on_opinion_submitted = None
+        mgr.submit_opinion(session.id, issue.id, "opus", "fix_required", "Still broken")
+
+        await orch._check_verification_complete(session.id)
+        assert session.status == SessionStatus.FIXING
+
+        # Round 2: still fix_required but max reached → COMPLETE
+        session.verification_round = 2
+        session.status = SessionStatus.VERIFYING
+        issue.turn += 1
+        session.agent_states["opus"] = AgentState(
+            model_id="opus", status=AgentStatus.WAITING, task_type=AgentTaskType.VERIFICATION,
+        )
+        mgr.submit_opinion(session.id, issue.id, "opus", "fix_required", "Still broken round 2")
+
+        await orch._check_verification_complete(session.id)
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_backward_compat_no_fixing(self):
+        """All dismissed (no fix_required) → COMPLETE directly, skipping AGENT_RESPONSE/FIXING."""
+        from ai_review.models import Issue, Severity
+
+        models = [ModelConfig(id="opus", client_type="claude-code")]
+        mgr, session = _make_manager_with_config(models)
+        session.status = SessionStatus.DELIBERATING
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        # Create a dismissed issue (consensus=True, type=dismissed)
+        issue = Issue(
+            title="Nit", severity=Severity.LOW, file="x.py",
+            description="minor", consensus=True, consensus_type="dismissed",
+        )
+        session.issues.append(issue)
+
+        # _try_agent_response_or_finish: no fix_required → skip AGENT_RESPONSE → COMPLETE
+        await orch._try_agent_response_or_finish(session.id)
+        assert session.status == SessionStatus.COMPLETE
+
+        await orch.close()
