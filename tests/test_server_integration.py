@@ -1398,3 +1398,151 @@ class TestActionableIssuesEndpoint:
     async def test_nonexistent_session_returns_404(self, client):
         resp = await client.get("/api/sessions/nonexistent/actionable-issues")
         assert resp.status_code == 404
+
+
+class TestFullFlowE2E:
+    """End-to-end tests covering full review lifecycle via HTTP endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_full_flow_with_verification(self, app, client):
+        """Session → review → process → consensus(fix_required) → fix-complete → VERIFYING → opinion → report."""
+        from ai_review.consensus import apply_consensus
+
+        # 1. Create session
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        assert resp.status_code == 200
+        sid = resp.json()["session_id"]
+
+        # 2. Submit reviews
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "reviewer-a",
+            "issues": [{"title": "SQL injection", "severity": "critical", "file": "db.py", "description": "raw sql"}],
+        })
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "reviewer-b",
+            "issues": [{"title": "Memory leak", "severity": "high", "file": "pool.py", "description": "not closed"}],
+        })
+
+        # 3. Process reviews
+        resp = await client.post(f"/api/sessions/{sid}/process")
+        assert resp.status_code == 200
+        assert resp.json()["after_dedup"] == 2
+
+        # 4. Establish consensus (fix_required)
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        for issue in session.issues:
+            manager.submit_opinion(sid, issue.id, "reviewer-a", "fix_required", "confirmed", "high")
+            manager.submit_opinion(sid, issue.id, "reviewer-b", "fix_required", "confirmed", "high")
+        apply_consensus(session.issues, session.config.consensus_threshold)
+        assert all(i.consensus_type == "fix_required" for i in session.issues)
+
+        # 5. Transition to FIXING
+        session.status = SessionStatus.FIXING
+        session.head = "abc123"
+        manager.persist()
+
+        # 6. Submit fix-complete → VERIFYING
+        mock_delta = [DiffFile(path="db.py", additions=5, deletions=2, content="+fix")]
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            resp = await client.post(f"/api/sessions/{sid}/fix-complete", json={
+                "commit_hash": "def456",
+                "issues_addressed": [i.id for i in session.issues],
+                "submitted_by": "coding-agent",
+            })
+        assert resp.status_code == 200
+        assert resp.json()["verification_round"] == 1
+
+        # Verify status is VERIFYING
+        resp = await client.get(f"/api/sessions/{sid}/status")
+        assert resp.json()["status"] == "verifying"
+
+        # 7. Submit verification opinions
+        for issue in session.issues:
+            resp = await client.post(f"/api/sessions/{sid}/issues/{issue.id}/opinions", json={
+                "model_id": "reviewer-a",
+                "action": "no_fix",
+                "reasoning": "Properly fixed",
+            })
+            assert resp.status_code == 200
+
+        # 8. Finish and get report
+        resp = await client.post(f"/api/sessions/{sid}/finish")
+        assert resp.status_code == 200
+        report = resp.json()
+
+        # Verify report completeness
+        assert report["session_id"] == sid
+        assert "status" in report
+        assert len(report["issues"]) == 2
+        assert len(report["fix_commits"]) == 1
+        assert report["verification_round"] == 1
+        assert report["stats"]["total_issues_found"] == 2
+        assert report["stats"]["fix_required"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_full_flow_context_to_report(self, client):
+        """Context submission → review → finish → report includes context."""
+        # 1. Create session
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        # 2. Submit implementation context
+        resp = await client.post(f"/api/sessions/{sid}/implementation-context", json={
+            "summary": "Add caching layer",
+            "decisions": ["Use Redis", "TTL 5min"],
+            "submitted_by": "coding-agent",
+        })
+        assert resp.status_code == 200
+
+        # 3. Submit review
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "reviewer-a",
+            "issues": [{"title": "Cache miss", "severity": "medium", "file": "cache.py", "description": "no fallback"}],
+        })
+
+        # 4. Finish
+        resp = await client.post(f"/api/sessions/{sid}/finish")
+        assert resp.status_code == 200
+        report = resp.json()
+
+        # 5. Verify context in report
+        assert report["implementation_context"] is not None
+        assert report["implementation_context"]["summary"] == "Add caching layer"
+        assert "Use Redis" in report["implementation_context"]["decisions"]
+        assert len(report["issues"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_backward_compat_finish_only(self, client):
+        """Existing finish API alone should produce COMPLETE + report (no M1~M4 APIs used)."""
+        # 1. Create session
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        # 2. Submit review (basic M0 flow)
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "a",
+            "issues": [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        })
+
+        # 3. Finish directly (no process, no context, no fix-complete)
+        resp = await client.post(f"/api/sessions/{sid}/finish")
+        assert resp.status_code == 200
+
+        # 4. Verify COMPLETE status
+        resp = await client.get(f"/api/sessions/{sid}/status")
+        assert resp.json()["status"] == "complete"
+
+        # 5. Get report
+        resp = await client.get(f"/api/sessions/{sid}/report")
+        assert resp.status_code == 200
+        report = resp.json()
+
+        # Report has all new fields but empty/null for unused lifecycle stages
+        assert report["issue_responses"] == []
+        assert report["fix_commits"] == []
+        assert report["verification_round"] == 0
+        assert report["overall_reviews"] == []
+        assert report["implementation_context"] is None
+        assert report["stats"]["total_issues_found"] == 1
+        assert len(report["issues"]) == 1

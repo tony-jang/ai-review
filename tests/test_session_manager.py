@@ -1680,3 +1680,60 @@ class TestGetActionableIssues:
         assert result["unaddressed"] == 0
         assert result["issues"] == []
         assert result["by_file"] == {}
+
+
+class TestBackwardCompatibility:
+    @pytest.mark.asyncio
+    async def test_report_without_new_fields(self, manager):
+        """Session with no new M1~M4 data should still produce a valid report."""
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        manager.create_issues_from_reviews(sid)
+
+        report = manager.get_final_report(sid)
+        # Original fields preserved
+        assert "session_id" in report
+        assert "issues" in report
+        assert "stats" in report
+        assert report["stats"]["total_issues_found"] == 1
+        assert report["stats"]["after_dedup"] == 1
+        assert "consensus_reached" in report["stats"]
+        assert "dismissed" in report["stats"]
+        # New fields present but empty/null
+        assert report["issue_responses"] == []
+        assert report["fix_commits"] == []
+        assert report["verification_round"] == 0
+        assert report["overall_reviews"] == []
+        assert report["implementation_context"] is None
+        assert report["stats"]["fix_required"] == 0
+
+    @pytest.mark.asyncio
+    async def test_actionable_issues_empty_session(self, manager):
+        """Session with no issues should return empty actionable issues."""
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        result = manager.get_actionable_issues(sid)
+        assert result["total"] == 0
+        assert result["unaddressed"] == 0
+        assert result["issues"] == []
+        assert result["by_file"] == {}
+
+    @pytest.mark.asyncio
+    async def test_pr_markdown_minimal_session(self, manager):
+        """Minimal session should produce valid markdown."""
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        md = manager.generate_pr_markdown(sid)
+        assert isinstance(md, str)
+        assert "## AI Review Summary" in md
+        assert "Issues Found: 0" in md
+        # No fix commits or verification sections
+        assert "### Fix Commits" not in md
+        assert "### Verification" not in md
