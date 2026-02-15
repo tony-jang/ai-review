@@ -1,8 +1,10 @@
 """Tests for git diff parsing."""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
-from ai_review.git_diff import get_current_branch, get_diff_summary, parse_diff
+from ai_review.git_diff import collect_delta_diff, get_current_branch, get_diff_summary, parse_diff
 
 SAMPLE_NUMSTAT = """\
 10\t3\tsrc/main.py
@@ -103,3 +105,77 @@ class TestGetDiffSummary:
         assert summary["additions"] == 0
         assert summary["deletions"] == 0
         assert summary["file_list"] == []
+
+
+class TestCollectDeltaDiff:
+    @pytest.mark.asyncio
+    async def test_uses_2dot_range(self):
+        """Verify collect_delta_diff uses 2-dot range (from..to)."""
+        captured_args = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_args.append(args)
+            mock_proc = AsyncMock()
+            mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+            mock_proc.returncode = 0
+            return mock_proc
+
+        with patch("ai_review.git_diff.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            await collect_delta_diff("abc123", "def456")
+
+        # Should have two calls: numstat and full diff
+        assert len(captured_args) == 2
+        # Both should contain the 2-dot range
+        for call_args in captured_args:
+            assert "abc123..def456" in call_args
+
+    @pytest.mark.asyncio
+    async def test_returns_parsed_diff(self):
+        """Verify that the output is a properly parsed list of DiffFile."""
+        numstat = b"3\t1\tsrc/fix.py\n"
+        diff_content = b"""\
+diff --git a/src/fix.py b/src/fix.py
+index abc..def 100644
+--- a/src/fix.py
++++ b/src/fix.py
+@@ -1,3 +1,5 @@
+ def foo():
+-    pass
++    return 1
++    # fixed
++    # done
+"""
+
+        call_count = 0
+
+        async def fake_exec(*args, **kwargs):
+            nonlocal call_count
+            mock_proc = AsyncMock()
+            if call_count == 0:
+                mock_proc.communicate = AsyncMock(return_value=(numstat, b""))
+            else:
+                mock_proc.communicate = AsyncMock(return_value=(diff_content, b""))
+            call_count += 1
+            return mock_proc
+
+        with patch("ai_review.git_diff.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            files = await collect_delta_diff("abc", "def")
+
+        assert len(files) == 1
+        assert files[0].path == "src/fix.py"
+        assert files[0].additions == 3
+        assert files[0].deletions == 1
+        assert "def foo():" in files[0].content
+
+    @pytest.mark.asyncio
+    async def test_empty_diff(self):
+        """Empty diff output returns empty list."""
+        async def fake_exec(*args, **kwargs):
+            mock_proc = AsyncMock()
+            mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+            return mock_proc
+
+        with patch("ai_review.git_diff.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            files = await collect_delta_diff("abc", "def")
+
+        assert files == []

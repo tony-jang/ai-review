@@ -705,6 +705,33 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(e))
 
     # ------------------------------------------------------------------
+    # Fix Complete & Delta Context (Delta Review Protocol)
+    # ------------------------------------------------------------------
+
+    @app.post("/api/sessions/{session_id}/fix-complete")
+    async def api_fix_complete(session_id: str, request: Request):
+        body = await request.json()
+        try:
+            result = await manager.submit_fix_complete(
+                session_id,
+                body["commit_hash"],
+                issues_addressed=body.get("issues_addressed"),
+                submitted_by=body.get("submitted_by", ""),
+            )
+            return JSONResponse(result)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api/sessions/{session_id}/delta-context")
+    async def api_get_delta_context(session_id: str):
+        try:
+            return JSONResponse(manager.get_delta_context(session_id))
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    # ------------------------------------------------------------------
     # Agents — "current" routes MUST be registered before {session_id}
     # to prevent FastAPI from matching "current" as a session_id param.
     # ------------------------------------------------------------------

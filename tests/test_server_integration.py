@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from ai_review.models import SessionStatus
+from ai_review.models import DiffFile, SessionStatus
 from ai_review.server import create_app
 from ai_review.trigger.base import TriggerResult
 
@@ -1213,3 +1214,95 @@ class TestAgentResponseProtocol:
 
         status = (await client.get(f"/api/sessions/{sid}/status")).json()
         assert status["status"] == "complete"
+
+
+class TestFixCompleteProtocol:
+    """Integration tests for fix-complete and delta-context endpoints."""
+
+    async def _setup_fixing_session(self, app, client):
+        """Create session → review → process → consensus → FIXING."""
+        from ai_review.consensus import apply_consensus
+
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "reviewer-a",
+            "issues": [
+                {"title": "SQL injection", "severity": "critical", "file": "db.py", "description": "raw sql"},
+            ],
+        })
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "reviewer-b",
+            "issues": [
+                {"title": "Memory leak", "severity": "high", "file": "pool.py", "description": "not closed"},
+            ],
+        })
+
+        await client.post(f"/api/sessions/{sid}/process")
+
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        for issue in session.issues:
+            manager.submit_opinion(
+                sid, issue.id, "reviewer-a", "fix_required", "confirmed", "high",
+            )
+            manager.submit_opinion(
+                sid, issue.id, "reviewer-b", "fix_required", "confirmed", "high",
+            )
+        apply_consensus(session.issues, session.config.consensus_threshold)
+
+        session.status = SessionStatus.FIXING
+        session.head = "abc123"
+        manager.persist()
+        return sid, session
+
+    @pytest.mark.asyncio
+    async def test_fix_complete_success(self, app, client):
+        sid, session = await self._setup_fixing_session(app, client)
+        mock_delta = [DiffFile(path="db.py", additions=5, deletions=2, content="+fix")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            resp = await client.post(f"/api/sessions/{sid}/fix-complete", json={
+                "commit_hash": "def456",
+                "submitted_by": "coding-agent",
+            })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "accepted"
+        assert data["delta_files_changed"] == 1
+        assert data["verification_round"] == 1
+
+    @pytest.mark.asyncio
+    async def test_fix_complete_wrong_state(self, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        resp = await client.post(f"/api/sessions/{sid}/fix-complete", json={
+            "commit_hash": "abc",
+        })
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_delta_context_returns_fields(self, app, client):
+        sid, session = await self._setup_fixing_session(app, client)
+        mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+patched")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            await client.post(f"/api/sessions/{sid}/fix-complete", json={
+                "commit_hash": "def456",
+            })
+
+        resp = await client.get(f"/api/sessions/{sid}/delta-context")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id"] == sid
+        assert "delta_diff" in data
+        assert "delta_files" in data
+        assert "verification_round" in data
+        assert "fix_commits" in data
+        assert "original_issues" in data
+        assert data["delta_files"] == ["db.py"]
+
+

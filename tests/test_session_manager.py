@@ -1,6 +1,7 @@
 """Tests for SessionManager."""
 
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -1210,3 +1211,178 @@ class TestGetIssueResponseStatus:
         assert status["total_responded"] == 2
         assert status["all_responded"] is True
         assert len(status["pending_ids"]) == 0
+
+
+async def _setup_fixing_session(manager):
+    """Helper: create a session in FIXING state with confirmed issues."""
+    from ai_review.consensus import apply_consensus
+
+    start = await manager.start_review()
+    sid = start["session_id"]
+    manager.submit_review(
+        sid, "opus",
+        [{"title": "SQL injection", "severity": "critical", "file": "db.py", "description": "raw sql"}],
+    )
+    manager.submit_review(
+        sid, "gpt",
+        [{"title": "SQL injection dupe", "severity": "high", "file": "db.py", "description": "raw sql"}],
+    )
+    issues = manager.create_issues_from_reviews(sid)
+    session = manager.get_session(sid)
+
+    for issue in issues:
+        for model in ["opus", "gpt"]:
+            if issue.raised_by != model:
+                manager.submit_opinion(
+                    sid, issue.id, model,
+                    "fix_required", "confirmed", "high",
+                )
+
+    apply_consensus(issues, session.config.consensus_threshold)
+    session.status = SessionStatus.FIXING
+    session.head = "abc123"
+    manager.persist()
+    return sid, session
+
+
+class TestSubmitFixComplete:
+    @pytest.mark.asyncio
+    async def test_success(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        mock_delta = [DiffFile(path="db.py", additions=5, deletions=2, content="+fix")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            result = await manager.submit_fix_complete(sid, "def456")
+
+        assert result["status"] == "accepted"
+        assert result["commit_hash"] == "def456"
+        assert result["delta_files_changed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_wrong_state_raises(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        with pytest.raises(ValueError, match="Cannot submit fix-complete"):
+            await manager.submit_fix_complete(sid, "abc")
+
+    @pytest.mark.asyncio
+    async def test_commit_recorded(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
+            await manager.submit_fix_complete(sid, "def456", submitted_by="coding-agent")
+
+        assert len(session.fix_commits) == 1
+        assert session.fix_commits[0].commit_hash == "def456"
+        assert session.fix_commits[0].submitted_by == "coding-agent"
+
+    @pytest.mark.asyncio
+    async def test_delta_diff_collected(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+patched")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            await manager.submit_fix_complete(sid, "def456")
+
+        assert len(session.delta_diff) == 1
+        assert session.delta_diff[0].path == "db.py"
+
+    @pytest.mark.asyncio
+    async def test_verification_round_incremented(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        assert session.verification_round == 0
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
+            await manager.submit_fix_complete(sid, "def456")
+
+        assert session.verification_round == 1
+
+    @pytest.mark.asyncio
+    async def test_head_updated(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        assert session.head == "abc123"
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
+            await manager.submit_fix_complete(sid, "def456")
+
+        assert session.head == "def456"
+
+    @pytest.mark.asyncio
+    async def test_transitions_to_verifying(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
+            await manager.submit_fix_complete(sid, "def456")
+
+        assert session.status == SessionStatus.VERIFYING
+
+    @pytest.mark.asyncio
+    async def test_callback_called(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        callback_args = []
+        manager.on_fix_completed = lambda s: callback_args.append(s)
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
+            await manager.submit_fix_complete(sid, "def456")
+
+        assert callback_args == [sid]
+
+    @pytest.mark.asyncio
+    async def test_auto_fills_issues_addressed(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        confirmed_ids = sorted(
+            i.id for i in session.issues if i.consensus_type == "fix_required"
+        )
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
+            result = await manager.submit_fix_complete(sid, "def456")
+
+        assert result["issues_addressed"] == confirmed_ids
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_issue_raises(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+
+        with pytest.raises(KeyError, match="not found or not fix_required"):
+            with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
+                await manager.submit_fix_complete(sid, "def456", issues_addressed=["nonexistent"])
+
+
+class TestGetDeltaContext:
+    @pytest.mark.asyncio
+    async def test_full_fields(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        session.delta_diff = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=session.delta_diff):
+            await manager.submit_fix_complete(sid, "def456")
+
+        ctx = manager.get_delta_context(sid)
+        assert ctx["session_id"] == sid
+        assert "delta_diff" in ctx
+        assert "delta_files" in ctx
+        assert "verification_round" in ctx
+        assert "fix_commits" in ctx
+        assert "original_issues" in ctx
+        assert ctx["delta_files"] == ["db.py"]
+        assert ctx["verification_round"] == 1
+
+    @pytest.mark.asyncio
+    async def test_original_issues_only_fix_required(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [
+                {"title": "Bug A", "severity": "high", "file": "a.py", "description": "d"},
+                {"title": "Bug B", "severity": "low", "file": "b.py", "description": "d"},
+            ],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issues[0].consensus_type = "fix_required"
+        issues[1].consensus_type = "dismissed"
+
+        ctx = manager.get_delta_context(sid)
+        assert len(ctx["original_issues"]) == 1
+        assert ctx["original_issues"][0]["title"] == "Bug A"

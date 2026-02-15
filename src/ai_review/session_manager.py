@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ai_review.git_diff import collect_diff, get_current_branch, get_diff_summary, list_branches, parse_diff, validate_repo
+from ai_review.git_diff import collect_delta_diff, collect_diff, get_current_branch, get_diff_summary, list_branches, parse_diff, validate_repo
 from ai_review.knowledge import load_config, load_knowledge
 from ai_review.models import (
     AgentActivity,
@@ -21,6 +21,7 @@ from ai_review.models import (
     AgentStatus,
     AgentTaskType,
     DiffFile,
+    FixCommit,
     ImplementationContext,
     Issue,
     IssueResponse,
@@ -60,6 +61,7 @@ class SessionManager:
         self.on_review_submitted: Callable[[str, str], Any] | None = None  # (session_id, model_id)
         self.on_opinion_submitted: Callable[[str, str, str], Any] | None = None  # (session_id, issue_id, model_id)
         self.on_issue_responded: Callable[[str, str, str], Any] | None = None  # (session_id, issue_id, action)
+        self.on_fix_completed: Callable[[str], Any] | None = None  # (session_id,)
         self._load_state()
 
     @property
@@ -590,7 +592,7 @@ class SessionManager:
         """Submit a review with issues."""
         session = self.get_session(session_id)
 
-        if session.status != SessionStatus.REVIEWING:
+        if session.status not in (SessionStatus.REVIEWING, SessionStatus.VERIFYING):
             raise ValueError(f"Cannot submit review in {session.status.value} state")
 
         normalized_issues: list[dict] = []
@@ -915,6 +917,93 @@ class SessionManager:
             "all_responded": len(pending_ids) == 0 and len(confirmed_ids) > 0,
         }
 
+    async def submit_fix_complete(
+        self,
+        session_id: str,
+        commit_hash: str,
+        issues_addressed: list[str] | None = None,
+        submitted_by: str = "",
+    ) -> dict:
+        """Record a fix commit, collect delta diff, and transition to VERIFYING."""
+        session = self.get_session(session_id)
+        if session.status != SessionStatus.FIXING:
+            raise ValueError(f"Cannot submit fix-complete in {session.status.value} state")
+
+        # Determine which issues are addressed
+        confirmed_ids = {
+            i.id for i in session.issues if i.consensus_type == "fix_required"
+        }
+        if issues_addressed is not None:
+            for iid in issues_addressed:
+                if iid not in confirmed_ids:
+                    raise KeyError(f"Issue not found or not fix_required: {iid}")
+        else:
+            issues_addressed = sorted(confirmed_ids)
+
+        # Record the fix commit
+        fix_commit = FixCommit(
+            commit_hash=commit_hash,
+            issues_addressed=issues_addressed,
+            submitted_by=submitted_by,
+        )
+        session.fix_commits.append(fix_commit)
+
+        # Collect delta diff from previous head to the new commit
+        prev_head = session.head
+        if prev_head and session.repo_path:
+            session.delta_diff = await collect_delta_diff(
+                prev_head, commit_hash, repo_path=session.repo_path,
+            )
+        else:
+            session.delta_diff = []
+
+        # Update head and verification round
+        session.head = commit_hash
+        session.verification_round += 1
+
+        # Transition to VERIFYING
+        transition(session, SessionStatus.VERIFYING)
+        self.broker.publish("phase_change", {
+            "status": "verifying",
+            "session_id": session_id,
+            "verification_round": session.verification_round,
+        })
+
+        if self.on_fix_completed is not None:
+            self.on_fix_completed(session_id)
+
+        self.persist()
+        return {
+            "status": "accepted",
+            "commit_hash": commit_hash,
+            "issues_addressed": issues_addressed,
+            "delta_files_changed": len(session.delta_diff),
+            "verification_round": session.verification_round,
+        }
+
+    def get_delta_context(self, session_id: str) -> dict:
+        """Return delta diff context for verification review."""
+        session = self.get_session(session_id)
+        confirmed = [
+            {
+                "id": i.id,
+                "title": i.title,
+                "severity": i.severity.value,
+                "file": i.file,
+                "description": i.description,
+            }
+            for i in session.issues
+            if i.consensus_type == "fix_required"
+        ]
+        return {
+            "session_id": session_id,
+            "delta_diff": [d.model_dump(mode="json") for d in session.delta_diff],
+            "delta_files": [d.path for d in session.delta_diff],
+            "verification_round": session.verification_round,
+            "fix_commits": [fc.model_dump(mode="json") for fc in session.fix_commits],
+            "original_issues": confirmed,
+        }
+
     def get_issue_thread(self, session_id: str, issue_id: str) -> dict:
         """Get a specific issue with its thread."""
         session = self.get_session(session_id)
@@ -940,7 +1029,7 @@ class SessionManager:
         is_human_like = model_id in human_like_models
 
         is_human_reopen = is_human_like and session.status == SessionStatus.COMPLETE
-        if session.status not in (SessionStatus.DELIBERATING, SessionStatus.REVIEWING) and not is_human_reopen:
+        if session.status not in (SessionStatus.DELIBERATING, SessionStatus.REVIEWING, SessionStatus.VERIFYING) and not is_human_reopen:
             raise ValueError(f"Cannot submit opinion in {session.status.value} state")
 
         for issue in session.issues:

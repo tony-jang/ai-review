@@ -114,6 +114,39 @@ async def collect_diff(
     return parse_diff(numstat_text, diff_text)
 
 
+async def collect_delta_diff(
+    from_ref: str,
+    to_ref: str = "HEAD",
+    repo_path: str | Path | None = None,
+) -> list[DiffFile]:
+    """Collect diff between two specific refs (2-dot direct comparison)."""
+    cwd = str(repo_path) if repo_path else None
+    diff_range = f"{from_ref}..{to_ref}"
+
+    # Get numstat for per-file additions/deletions
+    numstat_proc = await asyncio.create_subprocess_exec(
+        "git", "diff", diff_range, "--numstat",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    numstat_out, _ = await numstat_proc.communicate()
+
+    # Get full diff for content
+    diff_proc = await asyncio.create_subprocess_exec(
+        "git", "diff", diff_range,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    diff_out, _ = await diff_proc.communicate()
+
+    numstat_text = numstat_out.decode()
+    diff_text = diff_out.decode()
+
+    return parse_diff(numstat_text, diff_text)
+
+
 def parse_diff(numstat_text: str, diff_text: str) -> list[DiffFile]:
     """Parse git diff output into DiffFile list."""
     # Parse numstat
