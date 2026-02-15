@@ -640,6 +640,7 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
                 body["reasoning"],
                 body.get("suggested_severity"),
                 body.get("mentions"),
+                confidence=float(body.get("confidence", 1.0)),
             )
             return JSONResponse(result)
         except KeyError as e:

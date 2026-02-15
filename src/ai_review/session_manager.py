@@ -811,6 +811,7 @@ class SessionManager:
         reasoning: str,
         suggested_severity: str | None = None,
         mentions: list[str] | None = None,
+        confidence: float = 1.0,
     ) -> dict:
         """Submit an opinion on an issue."""
         session = self.get_session(session_id)
@@ -843,6 +844,7 @@ class SessionManager:
                     action=OpinionAction(action),
                     reasoning=reasoning,
                     suggested_severity=sev,
+                    confidence=max(0.0, min(float(confidence), 1.0)),
                     turn=target_turn,
                     mentions=sorted(set((mentions or []) + self._extract_mentions(reasoning, session))),
                 )
