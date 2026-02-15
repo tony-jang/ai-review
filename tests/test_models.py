@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from ai_review.models import (
     AgentActivity,
     DiffFile,
+    ImplementationContext,
     Issue,
     Knowledge,
     ModelConfig,
@@ -231,6 +232,39 @@ class TestAgentActivity:
         data = {"id": "test123", "base": "main", "status": "idle"}
         session = ReviewSession.model_validate(data)
         assert session.agent_activities == []
+
+
+class TestImplementationContext:
+    def test_default_values(self):
+        ic = ImplementationContext()
+        assert ic.summary == ""
+        assert ic.decisions == []
+        assert ic.tradeoffs == []
+        assert ic.known_issues == []
+        assert ic.out_of_scope == []
+        assert ic.submitted_by == ""
+        assert ic.submitted_at is None
+
+    def test_serialization_roundtrip(self):
+        ic = ImplementationContext(
+            summary="Add caching layer",
+            decisions=["Use Redis for cache"],
+            tradeoffs=["Memory vs speed"],
+            known_issues=["No TTL yet"],
+            out_of_scope=["Cache invalidation"],
+            submitted_by="coding-agent",
+        )
+        data = ic.model_dump(mode="json")
+        restored = ImplementationContext.model_validate(data)
+        assert restored.summary == "Add caching layer"
+        assert restored.decisions == ["Use Redis for cache"]
+        assert restored.submitted_by == "coding-agent"
+
+    def test_session_without_context(self):
+        """Old session JSON without implementation_context deserializes as None."""
+        data = {"id": "old123", "base": "main", "status": "idle"}
+        session = ReviewSession.model_validate(data)
+        assert session.implementation_context is None
 
 
 class TestReviewSession:

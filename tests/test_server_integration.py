@@ -940,3 +940,39 @@ class TestServerOrchestrator:
         assert "view_file" in actions
         assert "search" in actions
         assert "view_tree" in actions
+
+    @pytest.mark.asyncio
+    async def test_submit_implementation_context(self, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        resp = await client.post(f"/api/sessions/{sid}/implementation-context", json={
+            "summary": "Add caching",
+            "decisions": ["Use Redis"],
+            "tradeoffs": ["Memory cost"],
+            "submitted_by": "coding-agent",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["summary"] == "Add caching"
+        assert data["decisions"] == ["Use Redis"]
+
+        # Verify included in GET context
+        resp = await client.get(f"/api/sessions/{sid}/context")
+        assert resp.status_code == 200
+        ctx = resp.json()
+        assert "implementation_context" in ctx
+        assert ctx["implementation_context"]["summary"] == "Add caching"
+
+    @pytest.mark.asyncio
+    async def test_submit_context_wrong_state(self, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        # Finish the session to reach COMPLETE state
+        await client.post(f"/api/sessions/{sid}/finish")
+
+        resp = await client.post(f"/api/sessions/{sid}/implementation-context", json={
+            "summary": "too late",
+        })
+        assert resp.status_code == 400

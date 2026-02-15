@@ -87,6 +87,35 @@ class TestBuildReviewPrompt:
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000", agent_key="k1")
         assert "both GET and POST" in prompt
 
+    def test_includes_implementation_context(self):
+        ic = {
+            "summary": "Add caching layer",
+            "decisions": ["Use Redis for persistence"],
+            "tradeoffs": ["Memory overhead"],
+            "known_issues": ["No TTL support"],
+            "out_of_scope": ["Cache invalidation"],
+        }
+        prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000", implementation_context=ic)
+        assert "## Implementation Context" in prompt
+        assert "### 변경 요약" in prompt
+        assert "Add caching layer" in prompt
+        assert "### 의도적 결정" in prompt
+        assert "Use Redis for persistence" in prompt
+        assert "### 트레이드오프" in prompt
+        assert "Memory overhead" in prompt
+        assert "### 알려진 제한" in prompt
+        assert "No TTL support" in prompt
+        assert "### 의도적 제외" in prompt
+        assert "Cache invalidation" in prompt
+
+    def test_no_context_omits_section(self):
+        prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000", implementation_context=None)
+        assert "## Implementation Context" not in prompt
+
+    def test_respects_decisions_instruction(self):
+        prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
+        assert "Respect the author's stated decisions" in prompt
+
 
 class TestBuildDeliberationPrompt:
     def test_contains_model_id(self):

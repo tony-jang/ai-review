@@ -873,6 +873,66 @@ class TestAgentPresets:
             await manager.start_review("main", preset_ids=[])
 
 
+class TestSubmitImplementationContext:
+    @pytest.mark.asyncio
+    async def test_submit_in_reviewing(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        result = manager.submit_implementation_context(sid, {
+            "summary": "Add caching",
+            "decisions": ["Use Redis"],
+            "submitted_by": "coding-agent",
+        })
+        assert result["summary"] == "Add caching"
+        assert result["decisions"] == ["Use Redis"]
+        assert result["submitted_by"] == "coding-agent"
+        assert result["submitted_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_submit_in_collecting(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        session = manager.get_session(sid)
+        session.status = SessionStatus.COLLECTING
+
+        result = manager.submit_implementation_context(sid, {"summary": "WIP"})
+        assert result["summary"] == "WIP"
+
+    @pytest.mark.asyncio
+    async def test_submit_rejects_in_complete(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        session = manager.get_session(sid)
+        session.status = SessionStatus.COMPLETE
+
+        with pytest.raises(ValueError, match="Cannot submit implementation context"):
+            manager.submit_implementation_context(sid, {"summary": "too late"})
+
+    @pytest.mark.asyncio
+    async def test_context_included_in_review_context(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_implementation_context(sid, {
+            "summary": "Refactor auth module",
+            "tradeoffs": ["Breaks backward compat"],
+        })
+
+        ctx = manager.get_review_context(sid)
+        assert "implementation_context" in ctx
+        assert ctx["implementation_context"]["summary"] == "Refactor auth module"
+        assert ctx["implementation_context"]["tradeoffs"] == ["Breaks backward compat"]
+
+    @pytest.mark.asyncio
+    async def test_no_context_omits_key(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        ctx = manager.get_review_context(sid)
+        assert "implementation_context" not in ctx
+
+
 class TestAgentElapsed:
     @pytest.mark.asyncio
     async def test_elapsed_freezes_while_waiting_and_ticks_while_reviewing(self, manager):
