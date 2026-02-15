@@ -6,6 +6,7 @@ from ai_review.models import (
     AgentActivity,
     AgentTaskType,
     DiffFile,
+    FixCommit,
     ImplementationContext,
     Issue,
     IssueResponse,
@@ -37,7 +38,7 @@ class TestSeverity:
 
 class TestSessionStatus:
     def test_all_states_exist(self):
-        expected = {"idle", "collecting", "reviewing", "dedup", "deliberating", "agent_response", "complete"}
+        expected = {"idle", "collecting", "reviewing", "dedup", "deliberating", "agent_response", "fixing", "verifying", "complete"}
         actual = {s.value for s in SessionStatus}
         assert actual == expected
 
@@ -287,6 +288,40 @@ class TestIssueResponse:
         assert AgentTaskType.AGENT_RESPONSE == "agent_response"
         assert AgentTaskType("agent_response") == AgentTaskType.AGENT_RESPONSE
 
+    def test_agent_task_type_verification(self):
+        assert AgentTaskType.VERIFICATION == "verification"
+        assert AgentTaskType("verification") == AgentTaskType.VERIFICATION
+
+
+class TestFixCommit:
+    def test_creation(self):
+        fc = FixCommit(commit_hash="abc123")
+        assert fc.commit_hash == "abc123"
+        assert fc.issues_addressed == []
+        assert fc.submitted_by == ""
+        assert fc.submitted_at is not None
+
+    def test_all_fields(self):
+        fc = FixCommit(
+            commit_hash="def456",
+            issues_addressed=["issue1", "issue2"],
+            submitted_by="coding-agent",
+        )
+        assert fc.issues_addressed == ["issue1", "issue2"]
+        assert fc.submitted_by == "coding-agent"
+
+    def test_serialization_roundtrip(self):
+        fc = FixCommit(
+            commit_hash="abc123",
+            issues_addressed=["i1"],
+            submitted_by="agent",
+        )
+        data = fc.model_dump(mode="json")
+        restored = FixCommit.model_validate(data)
+        assert restored.commit_hash == "abc123"
+        assert restored.issues_addressed == ["i1"]
+        assert restored.submitted_by == "agent"
+
 
 class TestAgentActivity:
     def test_creation(self):
@@ -346,6 +381,21 @@ class TestImplementationContext:
         assert session.implementation_context is None
 
 
+class TestSessionConfig:
+    def test_max_verification_rounds_default(self):
+        config = SessionConfig()
+        assert config.max_verification_rounds == 2
+
+    def test_max_verification_rounds_custom(self):
+        config = SessionConfig(max_verification_rounds=5)
+        assert config.max_verification_rounds == 5
+
+    def test_backward_compat_without_max_verification_rounds(self):
+        data = {"models": [], "max_turns": 3, "consensus_threshold": 2}
+        config = SessionConfig.model_validate(data)
+        assert config.max_verification_rounds == 2
+
+
 class TestReviewSession:
     def test_defaults(self):
         session = ReviewSession()
@@ -356,6 +406,9 @@ class TestReviewSession:
         assert session.issues == []
         assert session.client_sessions == {}
         assert session.agent_activities == []
+        assert session.fix_commits == []
+        assert session.verification_round == 0
+        assert session.delta_diff == []
         assert len(session.id) == 12
 
     def test_with_data(self, sample_session):
@@ -375,3 +428,11 @@ class TestReviewSession:
         restored = ReviewSession.model_validate_json(json_str)
         assert restored.id == sample_session.id
         assert restored.status == sample_session.status
+
+    def test_backward_compat_without_fix_fields(self):
+        """Old session JSON without fix_commits/verification_round/delta_diff deserializes fine."""
+        data = {"id": "old123", "base": "main", "status": "idle"}
+        session = ReviewSession.model_validate(data)
+        assert session.fix_commits == []
+        assert session.verification_round == 0
+        assert session.delta_diff == []

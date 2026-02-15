@@ -24,6 +24,8 @@ class SessionStatus(str, enum.Enum):
     DEDUP = "dedup"
     DELIBERATING = "deliberating"
     AGENT_RESPONSE = "agent_response"
+    FIXING = "fixing"
+    VERIFYING = "verifying"
     COMPLETE = "complete"
 
 
@@ -180,6 +182,7 @@ class AgentTaskType(str, enum.Enum):
     REVIEW = "review"
     DELIBERATION = "deliberation"
     AGENT_RESPONSE = "agent_response"
+    VERIFICATION = "verification"
 
 
 class MergeDecision(str, enum.Enum):
@@ -218,6 +221,7 @@ class SessionConfig(BaseModel):
     models: list[ModelConfig] = Field(default_factory=list)
     max_turns: int = 3
     consensus_threshold: int = 2
+    max_verification_rounds: int = 2
 
 
 # --- Agent Activity ---
@@ -238,6 +242,16 @@ class IssueResponse(BaseModel):
     action: IssueResponseAction
     reasoning: str = ""
     proposed_change: str = ""
+    submitted_by: str = ""
+    submitted_at: datetime = Field(default_factory=_utcnow)
+
+
+# --- Fix Commit ---
+
+
+class FixCommit(BaseModel):
+    commit_hash: str
+    issues_addressed: list[str] = Field(default_factory=list)
     submitted_by: str = ""
     submitted_at: datetime = Field(default_factory=_utcnow)
 
@@ -276,6 +290,9 @@ class ReviewSession(BaseModel):
     agent_chats: dict[str, list[AgentChatMessage]] = Field(default_factory=dict)
     agent_activities: list[AgentActivity] = Field(default_factory=list)
     issue_responses: list[IssueResponse] = Field(default_factory=list)
+    fix_commits: list[FixCommit] = Field(default_factory=list)
+    verification_round: int = 0
+    delta_diff: list[DiffFile] = Field(default_factory=list)
     implementation_context: ImplementationContext | None = None
     config: SessionConfig = Field(default_factory=SessionConfig)
     created_at: datetime = Field(default_factory=_utcnow)

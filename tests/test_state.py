@@ -24,7 +24,11 @@ class TestTransitions:
             (SessionStatus.DELIBERATING, SessionStatus.COMPLETE),
             (SessionStatus.DELIBERATING, SessionStatus.AGENT_RESPONSE),
             (SessionStatus.AGENT_RESPONSE, SessionStatus.DELIBERATING),
+            (SessionStatus.AGENT_RESPONSE, SessionStatus.FIXING),
             (SessionStatus.AGENT_RESPONSE, SessionStatus.COMPLETE),
+            (SessionStatus.FIXING, SessionStatus.VERIFYING),
+            (SessionStatus.VERIFYING, SessionStatus.FIXING),
+            (SessionStatus.VERIFYING, SessionStatus.COMPLETE),
         ],
     )
     def test_valid_transitions(self, from_status, to_status):
@@ -69,6 +73,9 @@ class TestInvalidTransitions:
             (SessionStatus.AGENT_RESPONSE, SessionStatus.REVIEWING),
             (SessionStatus.AGENT_RESPONSE, SessionStatus.IDLE),
             (SessionStatus.AGENT_RESPONSE, SessionStatus.DEDUP),
+            (SessionStatus.FIXING, SessionStatus.COMPLETE),
+            (SessionStatus.FIXING, SessionStatus.DELIBERATING),
+            (SessionStatus.VERIFYING, SessionStatus.DELIBERATING),
         ],
     )
     def test_invalid_transitions_raise(self, from_status, to_status):
@@ -94,6 +101,24 @@ class TestInvalidTransitions:
         transition(session, SessionStatus.DELIBERATING)
         transition(session, SessionStatus.AGENT_RESPONSE)
         assert session.status == SessionStatus.AGENT_RESPONSE
+        transition(session, SessionStatus.COMPLETE)
+        assert session.status == SessionStatus.COMPLETE
+
+    def test_lifecycle_with_fixing_verifying(self):
+        session = ReviewSession()
+        transition(session, SessionStatus.COLLECTING)
+        transition(session, SessionStatus.REVIEWING)
+        transition(session, SessionStatus.DEDUP)
+        transition(session, SessionStatus.DELIBERATING)
+        transition(session, SessionStatus.AGENT_RESPONSE)
+        transition(session, SessionStatus.FIXING)
+        assert session.status == SessionStatus.FIXING
+        transition(session, SessionStatus.VERIFYING)
+        assert session.status == SessionStatus.VERIFYING
+        # Re-fix cycle
+        transition(session, SessionStatus.FIXING)
+        transition(session, SessionStatus.VERIFYING)
+        # Complete after verification
         transition(session, SessionStatus.COMPLETE)
         assert session.status == SessionStatus.COMPLETE
 
