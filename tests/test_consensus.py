@@ -132,7 +132,7 @@ class TestApplyConsensus:
         assert result[1].consensus is True
         assert result[1].final_severity == Severity.DISMISSED
 
-    def test_no_consensus_uses_original_severity(self):
+    def test_no_consensus_leaves_severity_none(self):
         issue = _make_issue_with_thread([
             _make_opinion("opus", OpinionAction.RAISE, Severity.MEDIUM),
         ])
@@ -140,7 +140,8 @@ class TestApplyConsensus:
 
         result = apply_consensus([issue], threshold=2)
         assert result[0].consensus is False
-        assert result[0].final_severity == Severity.MEDIUM
+        assert result[0].final_severity is None
+        assert result[0].consensus_type is None
 
     def test_empty_list(self):
         assert apply_consensus([]) == []

@@ -1,4 +1,8 @@
-"""Consensus judgment for issue deliberation."""
+"""Consensus judgment for issue deliberation.
+
+Uses confidence-weighted voting to determine consensus.
+Each opinion's weight is its confidence value (0.0–1.0, default 1.0).
+"""
 
 from __future__ import annotations
 
@@ -6,76 +10,117 @@ from collections import Counter
 
 from ai_review.models import Issue, OpinionAction, Severity
 
+# Severity ordering for conservative tie-breaking (higher index = more severe)
+_SEVERITY_ORDER: dict[Severity, int] = {
+    Severity.LOW: 0,
+    Severity.MEDIUM: 1,
+    Severity.HIGH: 2,
+    Severity.CRITICAL: 3,
+}
 
-def check_consensus(issue: Issue, threshold: int = 2) -> bool:
-    """Check if an issue has reached consensus.
 
-    Consensus = at least `threshold` models agree (or disagree) on the same action.
-    Returns True if consensus is reached, False otherwise.
+def check_consensus(issue: Issue, threshold: float = 2.0) -> bool:
+    """Check if an issue has reached consensus via weighted voting.
+
+    Each model's first decisive vote (RAISE/FIX_REQUIRED or NO_FIX) is counted
+    with its confidence as weight.  COMMENT votes are excluded from the tally.
+
+    Returns True if weighted fix_required >= threshold OR weighted no_fix >= threshold.
     """
     if not issue.thread:
         return False
 
-    # Count fix_required/no_fix (exclude raise and comment)
-    fix_count = 0
-    no_fix_count = 0
+    weighted_fix = 0.0
+    weighted_no_fix = 0.0
     voters: set[str] = set()
 
     for op in issue.thread:
-        if op.model_id in voters and op.action in (OpinionAction.FIX_REQUIRED, OpinionAction.NO_FIX):
-            continue  # only count first vote per model
-        if op.action == OpinionAction.FIX_REQUIRED or op.action == OpinionAction.RAISE:
-            fix_count += 1
+        if op.model_id in voters:
+            continue
+        if op.action in (OpinionAction.FIX_REQUIRED, OpinionAction.RAISE):
+            weighted_fix += max(0.0, min(op.confidence, 1.0))
             voters.add(op.model_id)
         elif op.action == OpinionAction.NO_FIX:
-            no_fix_count += 1
+            weighted_no_fix += max(0.0, min(op.confidence, 1.0))
             voters.add(op.model_id)
 
-    return fix_count >= threshold or no_fix_count >= threshold
+    return weighted_fix >= threshold or weighted_no_fix >= threshold
+
+
+def determine_consensus_type(issue: Issue) -> str:
+    """Determine the consensus type: 'fix_required', 'dismissed', or 'undecided'."""
+    weighted_fix = 0.0
+    weighted_no_fix = 0.0
+    voters: set[str] = set()
+
+    for op in issue.thread:
+        if op.model_id in voters:
+            continue
+        if op.action in (OpinionAction.FIX_REQUIRED, OpinionAction.RAISE):
+            weighted_fix += max(0.0, min(op.confidence, 1.0))
+            voters.add(op.model_id)
+        elif op.action == OpinionAction.NO_FIX:
+            weighted_no_fix += max(0.0, min(op.confidence, 1.0))
+            voters.add(op.model_id)
+
+    if weighted_fix > weighted_no_fix:
+        return "fix_required"
+    if weighted_no_fix > weighted_fix:
+        return "dismissed"
+    return "undecided"
 
 
 def determine_final_severity(issue: Issue) -> Severity:
-    """Determine the final severity by majority vote.
+    """Determine the final severity by confidence-weighted voting.
 
-    If majority disagrees → DISMISSED.
-    Otherwise → most suggested severity (or original).
+    If majority weighted vote is NO_FIX → DISMISSED.
+    Otherwise → confidence-weighted severity vote with conservative tie-breaking
+    (higher severity wins on tie).
+    Falls back to original severity if no severity votes.
     """
-    disagree_count = 0
-    agree_count = 0
-    severity_votes: list[Severity] = []
+    weighted_fix = 0.0
+    weighted_no_fix = 0.0
+    severity_weights: dict[Severity, float] = {}
+    voters: set[str] = set()
 
-    seen_models: set[str] = set()
     for op in issue.thread:
-        if op.model_id in seen_models:
+        if op.model_id in voters:
             continue
-        seen_models.add(op.model_id)
+        voters.add(op.model_id)
+        conf = max(0.0, min(op.confidence, 1.0))
 
         if op.action == OpinionAction.NO_FIX:
-            disagree_count += 1
+            weighted_no_fix += conf
         elif op.action in (OpinionAction.RAISE, OpinionAction.FIX_REQUIRED):
-            agree_count += 1
+            weighted_fix += conf
             if op.suggested_severity:
-                severity_votes.append(op.suggested_severity)
+                severity_weights[op.suggested_severity] = (
+                    severity_weights.get(op.suggested_severity, 0.0) + conf
+                )
 
-    # If more disagree than agree → dismissed
-    if disagree_count > agree_count:
+    # If more weighted no_fix than fix → dismissed
+    if weighted_no_fix > weighted_fix:
         return Severity.DISMISSED
 
-    # Majority vote on severity
-    if severity_votes:
-        counter = Counter(severity_votes)
-        return counter.most_common(1)[0][0]
+    # Confidence-weighted severity vote with conservative tie-breaking
+    if severity_weights:
+        max_weight = max(severity_weights.values())
+        # Among severities with the max weight, pick the highest (conservative)
+        candidates = [s for s, w in severity_weights.items() if w == max_weight]
+        return max(candidates, key=lambda s: _SEVERITY_ORDER.get(s, 0))
 
     return issue.severity
 
 
-def apply_consensus(issues: list[Issue], threshold: int = 2) -> list[Issue]:
-    """Apply consensus checks to all issues and set final severity."""
+def apply_consensus(issues: list[Issue], threshold: int | float = 2) -> list[Issue]:
+    """Apply consensus checks to all issues and set final severity + consensus_type."""
     for issue in issues:
-        issue.consensus = check_consensus(issue, threshold)
+        issue.consensus = check_consensus(issue, float(threshold))
         if issue.consensus:
+            issue.consensus_type = determine_consensus_type(issue)
             issue.final_severity = determine_final_severity(issue)
         else:
-            issue.final_severity = issue.severity
+            issue.consensus_type = None
+            issue.final_severity = None
 
     return issues

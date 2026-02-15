@@ -100,6 +100,7 @@ class Opinion(BaseModel):
     action: OpinionAction
     reasoning: str
     suggested_severity: Severity | None = None
+    confidence: float = 1.0
     turn: int = 0
     mentions: list[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=_utcnow)
@@ -130,6 +131,7 @@ class Issue(BaseModel):
     raised_by: str = ""
     thread: list[Opinion] = Field(default_factory=list)
     consensus: bool | None = None
+    consensus_type: str | None = None  # "fix_required", "dismissed", "undecided"
     final_severity: Severity | None = None
     turn: int = 0
     assist_messages: list[AssistMessage] = Field(default_factory=list)
