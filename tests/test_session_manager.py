@@ -660,6 +660,224 @@ class TestFinalReport:
         assert len(report["issues"]) == 2
 
 
+class TestGetFinalReportEnhanced:
+    @pytest.mark.asyncio
+    async def test_report_includes_lifecycle_fields(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "desc", "suggestion": "fix it"}],
+        )
+        manager.create_issues_from_reviews(sid)
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+
+        report = manager.get_final_report(sid)
+        assert "status" in report
+        assert "issue_responses" in report
+        assert "fix_commits" in report
+        assert "verification_round" in report
+        assert "overall_reviews" in report
+        assert "implementation_context" in report
+
+    @pytest.mark.asyncio
+    async def test_issue_has_new_fields(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "desc", "suggestion": "fix it"}],
+        )
+        manager.create_issues_from_reviews(sid)
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+
+        report = manager.get_final_report(sid)
+        issue = report["issues"][0]
+        assert "id" in issue
+        assert "consensus_type" in issue
+        assert issue["consensus_type"] == "fix_required"
+        assert "description" in issue
+        assert "suggestion" in issue
+        assert "desc" in issue["description"]
+        assert "fix it" in issue["suggestion"]
+
+    @pytest.mark.asyncio
+    async def test_stats_separates_fix_required_and_dismissed(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_review(
+            sid, "opus",
+            [
+                {"title": "Bug A", "severity": "high", "file": "a.py", "description": "d"},
+                {"title": "Bug B", "severity": "low", "file": "b.py", "description": "d"},
+                {"title": "Bug C", "severity": "medium", "file": "c.py", "description": "d"},
+            ],
+        )
+        manager.create_issues_from_reviews(sid)
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+        session.issues[1].consensus_type = "dismissed"
+        session.issues[2].consensus_type = "undecided"
+
+        report = manager.get_final_report(sid)
+        assert report["stats"]["fix_required"] == 1
+        assert report["stats"]["dismissed"] == 1
+        assert report["stats"]["consensus_reached"] == 2
+
+    @pytest.mark.asyncio
+    async def test_report_includes_issue_responses(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        manager.create_issues_from_reviews(sid)
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+        session.status = SessionStatus.AGENT_RESPONSE
+        manager.submit_issue_response(sid, session.issues[0].id, "accept", "will fix")
+
+        report = manager.get_final_report(sid)
+        assert len(report["issue_responses"]) == 1
+        assert report["issue_responses"][0]["action"] == "accept"
+
+    @pytest.mark.asyncio
+    async def test_report_includes_fix_commits(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            await manager.submit_fix_complete(sid, "def456", submitted_by="coding-agent")
+
+        report = manager.get_final_report(sid)
+        assert len(report["fix_commits"]) == 1
+        assert report["fix_commits"][0]["commit_hash"] == "def456"
+        assert report["verification_round"] == 1
+
+    @pytest.mark.asyncio
+    async def test_report_includes_overall_reviews(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_overall_review(
+            session_id=sid,
+            model_id="opus",
+            merge_decision="mergeable",
+            summary="All good",
+            task_type="review",
+        )
+
+        report = manager.get_final_report(sid)
+        assert len(report["overall_reviews"]) == 1
+        assert report["overall_reviews"][0]["merge_decision"] == "mergeable"
+
+    @pytest.mark.asyncio
+    async def test_report_includes_implementation_context(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_implementation_context(sid, {
+            "summary": "Add caching",
+            "decisions": ["Use Redis"],
+        })
+
+        report = manager.get_final_report(sid)
+        assert report["implementation_context"] is not None
+        assert report["implementation_context"]["summary"] == "Add caching"
+
+    @pytest.mark.asyncio
+    async def test_report_empty_session(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        report = manager.get_final_report(sid)
+        assert report["issues"] == []
+        assert report["issue_responses"] == []
+        assert report["fix_commits"] == []
+        assert report["overall_reviews"] == []
+        assert report["implementation_context"] is None
+        assert report["stats"]["fix_required"] == 0
+        assert report["stats"]["dismissed"] == 0
+
+
+class TestGeneratePrMarkdown:
+    @pytest.mark.asyncio
+    async def test_includes_issue_table(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        manager.submit_review(
+            sid, "opus",
+            [
+                {"title": "SQL injection", "severity": "high", "file": "db.py", "description": "raw sql"},
+                {"title": "Memory leak", "severity": "medium", "file": "pool.py", "description": "not closed"},
+            ],
+        )
+        manager.create_issues_from_reviews(sid)
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+        session.issues[1].consensus_type = "dismissed"
+
+        md = manager.generate_pr_markdown(sid)
+        assert "## AI Review Summary" in md
+        assert "Fix Required: 1" in md
+        assert "Dismissed: 1" in md
+        assert "| 1 |" in md
+        assert "| 2 |" in md
+        assert "SQL injection" in md
+        assert "db.py" in md
+
+    @pytest.mark.asyncio
+    async def test_includes_fix_commits(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            await manager.submit_fix_complete(
+                sid, "def456789",
+                issues_addressed=[session.issues[0].id],
+                submitted_by="coding-agent",
+            )
+
+        md = manager.generate_pr_markdown(sid)
+        assert "### Fix Commits" in md
+        assert "def4567" in md
+        assert "coding-agent" in md
+
+    @pytest.mark.asyncio
+    async def test_includes_verification(self, manager):
+        sid, session = await _setup_fixing_session(manager)
+        mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
+
+        with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
+            await manager.submit_fix_complete(
+                sid, "def456",
+                issues_addressed=[i.id for i in session.issues],
+                submitted_by="coding-agent",
+            )
+
+        md = manager.generate_pr_markdown(sid)
+        assert "### Verification" in md
+        assert "Rounds: 1" in md
+        assert "All issues resolved" in md
+
+    @pytest.mark.asyncio
+    async def test_minimal_session(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+
+        md = manager.generate_pr_markdown(sid)
+        assert "## AI Review Summary" in md
+        assert "Issues Found: 0" in md
+
+
 class TestAddManualIssue:
     @pytest.mark.asyncio
     async def test_adds_issue(self, manager):

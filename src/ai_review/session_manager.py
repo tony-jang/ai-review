@@ -1402,37 +1402,130 @@ class SessionManager:
         session = self.get_session(session_id)
 
         issues_data = []
-        consensus_count = 0
+        fix_required_count = 0
         dismissed_count = 0
 
         for issue in session.issues:
             issues_data.append({
+                "id": issue.id,
                 "title": issue.title,
                 "final_severity": (issue.final_severity or issue.severity).value,
                 "consensus": issue.consensus,
+                "consensus_type": issue.consensus_type,
                 "file": issue.file,
                 "line": issue.line,
                 "line_start": issue.line_start,
                 "line_end": issue.line_end,
+                "description": issue.description,
+                "suggestion": issue.suggestion,
                 "thread_summary": f"{len(issue.thread)} opinions",
             })
-            if issue.consensus:
-                consensus_count += 1
-            if issue.final_severity == Severity.DISMISSED:
+            if issue.consensus_type == "fix_required":
+                fix_required_count += 1
+            elif issue.consensus_type == "dismissed":
                 dismissed_count += 1
 
         total_raw = sum(len(r.issues) for r in session.reviews)
 
+        responses = [
+            {
+                "issue_id": r.issue_id,
+                "action": r.action.value if hasattr(r.action, "value") else r.action,
+                "reasoning": r.reasoning,
+            }
+            for r in session.issue_responses
+        ]
+
+        commits = [fc.model_dump(mode="json") for fc in session.fix_commits]
+
+        overall = [
+            {
+                "model_id": ov.model_id,
+                "merge_decision": ov.merge_decision,
+                "summary": ov.summary,
+                "task_type": ov.task_type,
+            }
+            for ov in session.overall_reviews
+        ]
+
         return {
             "session_id": session.id,
+            "status": session.status.value,
             "issues": issues_data,
+            "issue_responses": responses,
+            "fix_commits": commits,
+            "verification_round": session.verification_round,
+            "overall_reviews": overall,
+            "implementation_context": (
+                session.implementation_context.model_dump(mode="json")
+                if session.implementation_context else None
+            ),
             "stats": {
                 "total_issues_found": total_raw,
                 "after_dedup": len(session.issues),
-                "consensus_reached": consensus_count,
+                "consensus_reached": fix_required_count + dismissed_count,
+                "fix_required": fix_required_count,
                 "dismissed": dismissed_count,
             },
         }
+
+    def generate_pr_markdown(self, session_id: str) -> str:
+        """Generate a PR description markdown from the final report."""
+        report = self.get_final_report(session_id)
+        stats = report["stats"]
+        lines: list[str] = []
+
+        lines.append("## AI Review Summary")
+        lines.append("")
+        lines.append(
+            f"### Issues Found: {stats['after_dedup']}"
+            f" (Fix Required: {stats['fix_required']}, Dismissed: {stats['dismissed']})"
+        )
+        lines.append("")
+
+        if report["issues"]:
+            lines.append("| # | Severity | File | Title | Status |")
+            lines.append("|---|----------|------|-------|--------|")
+            for idx, issue in enumerate(report["issues"], 1):
+                status = issue.get("consensus_type") or "pending"
+                lines.append(
+                    f"| {idx} | {issue['final_severity']} | {issue['file']}"
+                    f" | {issue['title']} | {status} |"
+                )
+            lines.append("")
+
+        if report["fix_commits"]:
+            lines.append("### Fix Commits")
+            for fc in report["fix_commits"]:
+                short_hash = fc["commit_hash"][:7]
+                by = fc.get("submitted_by") or "unknown"
+                addressed = fc.get("issues_addressed") or []
+                # Find file names for addressed issues
+                file_set: list[str] = []
+                for issue in report["issues"]:
+                    if issue["id"] in addressed:
+                        if issue["file"] not in file_set:
+                            file_set.append(issue["file"])
+                files_str = ", ".join(file_set) if file_set else "general"
+                lines.append(f"- `{short_hash}` \u2014 {files_str} (by {by})")
+            lines.append("")
+
+        vr = report.get("verification_round", 0)
+        if vr > 0:
+            lines.append("### Verification")
+            lines.append(f"- Rounds: {vr}")
+            unresolved = stats["fix_required"] - stats.get("dismissed", 0)
+            # Check if all fix_required issues are addressed
+            addressed_ids: set[str] = set()
+            for fc in report["fix_commits"]:
+                addressed_ids.update(fc.get("issues_addressed") or [])
+            fix_issues = [i for i in report["issues"] if i.get("consensus_type") == "fix_required"]
+            all_resolved = all(i["id"] in addressed_ids for i in fix_issues) if fix_issues else True
+            result_text = "All issues resolved" if all_resolved else "Some issues remain unresolved"
+            lines.append(f"- Result: {result_text}")
+            lines.append("")
+
+        return "\n".join(lines)
 
     def _extract_mentions(self, text: str, session: ReviewSession) -> list[str]:
         """Extract @model mentions from free-form text."""
