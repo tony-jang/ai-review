@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from ai_review.consensus import apply_consensus
 from ai_review.dedup import deduplicate_issues
-from ai_review.models import AgentState, AgentStatus, AgentTaskType, ModelConfig, SessionStatus, _utcnow
+from ai_review.models import AgentState, AgentStatus, AgentTaskType, IssueResponseAction, ModelConfig, SessionStatus, _utcnow
 from ai_review.prompts import build_deliberation_prompt, build_review_prompt
 from ai_review.state import can_transition, transition
 from ai_review.trigger.base import TriggerEngine
@@ -40,6 +40,7 @@ class Orchestrator:
         # Register callbacks on the manager
         manager.on_review_submitted = self._on_review_submitted
         manager.on_opinion_submitted = self._on_opinion_submitted
+        manager.on_issue_responded = self._on_issue_responded
 
     # --- Public API ---
 
@@ -146,6 +147,7 @@ class Orchestrator:
         # Detach callbacks
         self.manager.on_review_submitted = None
         self.manager.on_opinion_submitted = None
+        self.manager.on_issue_responded = None
         self.manager.persist()
 
     async def stop_session(self, session_id: str) -> None:
@@ -329,6 +331,38 @@ class Orchestrator:
             asyncio.ensure_future(self._trigger_deliberation_round(session_id))
         asyncio.ensure_future(self._check_and_advance(session_id))
 
+    def _on_issue_responded(self, session_id: str, issue_id: str, action: str) -> None:
+        """Called after a coding agent submits a response to an issue."""
+        if action == IssueResponseAction.DISPUTE.value:
+            asyncio.ensure_future(self._handle_dispute_redeliberation(session_id))
+        else:
+            asyncio.ensure_future(self._check_all_responses_complete(session_id))
+
+    async def _handle_dispute_redeliberation(self, session_id: str) -> None:
+        """Handle dispute: clear responses and re-enter deliberation."""
+        session = self.manager.get_session(session_id)
+        session.issue_responses = []
+        if can_transition(session, SessionStatus.DELIBERATING):
+            transition(session, SessionStatus.DELIBERATING)
+            self.manager.broker.publish(
+                "phase_change", {"status": "deliberating", "session_id": session_id}
+            )
+        self.manager.persist()
+        await self._trigger_deliberation_round(session_id)
+
+    async def _check_all_responses_complete(self, session_id: str) -> None:
+        """Check if all confirmed issues have been responded to. If so, finish."""
+        status = self.manager.get_issue_response_status(session_id)
+        if status["all_responded"]:
+            # Check for any disputes
+            session = self.manager.get_session(session_id)
+            has_dispute = any(
+                r.action == IssueResponseAction.DISPUTE
+                for r in session.issue_responses
+            )
+            if not has_dispute:
+                await self._finish(session_id)
+
     # --- Internal flow ---
 
     async def _advance_to_deliberation(self, session_id: str) -> None:
@@ -446,7 +480,7 @@ class Orchestrator:
         all_consensus = all(i.consensus for i in session.issues)
 
         if all_consensus or max_turn >= session.config.max_turns:
-            await self._finish(session_id)
+            await self._try_agent_response_or_finish(session_id)
             return
 
         # Check if all models have responded in this round
@@ -470,7 +504,7 @@ class Orchestrator:
             apply_consensus(session.issues, session.config.consensus_threshold)
 
             if all(i.consensus for i in session.issues):
-                await self._finish(session_id)
+                await self._try_agent_response_or_finish(session_id)
             else:
                 await self._trigger_deliberation_round(session_id)
             return
@@ -478,6 +512,19 @@ class Orchestrator:
         # Not all responded yet. Ensure non-busy pending agents are triggered.
         await self._trigger_deliberation_round(session_id)
         self.manager.persist()
+
+    async def _try_agent_response_or_finish(self, session_id: str) -> None:
+        """Transition to AGENT_RESPONSE if there are confirmed issues, otherwise finish."""
+        session = self.manager.get_session(session_id)
+        has_confirmed = any(i.consensus_type == "fix_required" for i in session.issues)
+        if has_confirmed and can_transition(session, SessionStatus.AGENT_RESPONSE):
+            transition(session, SessionStatus.AGENT_RESPONSE)
+            self.manager.broker.publish(
+                "phase_change", {"status": "agent_response", "session_id": session_id}
+            )
+            self.manager.persist()
+            return
+        await self._finish(session_id)
 
     async def _finish(self, session_id: str) -> None:
         """Transition to COMPLETE and clean up triggers."""
