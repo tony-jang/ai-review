@@ -23,7 +23,14 @@ class SessionStatus(str, enum.Enum):
     REVIEWING = "reviewing"
     DEDUP = "dedup"
     DELIBERATING = "deliberating"
+    AGENT_RESPONSE = "agent_response"
     COMPLETE = "complete"
+
+
+class IssueResponseAction(str, enum.Enum):
+    ACCEPT = "accept"
+    DISPUTE = "dispute"
+    PARTIAL = "partial"
 
 
 class OpinionAction(str, enum.Enum):
@@ -172,6 +179,7 @@ class AgentStatus(str, enum.Enum):
 class AgentTaskType(str, enum.Enum):
     REVIEW = "review"
     DELIBERATION = "deliberation"
+    AGENT_RESPONSE = "agent_response"
 
 
 class MergeDecision(str, enum.Enum):
@@ -222,6 +230,18 @@ class AgentActivity(BaseModel):
     timestamp: datetime = Field(default_factory=_utcnow)
 
 
+# --- Issue Response ---
+
+
+class IssueResponse(BaseModel):
+    issue_id: str
+    action: IssueResponseAction
+    reasoning: str = ""
+    proposed_change: str = ""
+    submitted_by: str = ""
+    submitted_at: datetime = Field(default_factory=_utcnow)
+
+
 # --- Implementation Context ---
 
 
@@ -255,6 +275,7 @@ class ReviewSession(BaseModel):
     agent_states: dict[str, AgentState] = Field(default_factory=dict)
     agent_chats: dict[str, list[AgentChatMessage]] = Field(default_factory=dict)
     agent_activities: list[AgentActivity] = Field(default_factory=list)
+    issue_responses: list[IssueResponse] = Field(default_factory=list)
     implementation_context: ImplementationContext | None = None
     config: SessionConfig = Field(default_factory=SessionConfig)
     created_at: datetime = Field(default_factory=_utcnow)

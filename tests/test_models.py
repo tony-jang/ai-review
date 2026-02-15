@@ -4,9 +4,12 @@ from datetime import datetime, timezone
 
 from ai_review.models import (
     AgentActivity,
+    AgentTaskType,
     DiffFile,
     ImplementationContext,
     Issue,
+    IssueResponse,
+    IssueResponseAction,
     Knowledge,
     ModelConfig,
     Opinion,
@@ -34,7 +37,7 @@ class TestSeverity:
 
 class TestSessionStatus:
     def test_all_states_exist(self):
-        expected = {"idle", "collecting", "reviewing", "dedup", "deliberating", "complete"}
+        expected = {"idle", "collecting", "reviewing", "dedup", "deliberating", "agent_response", "complete"}
         actual = {s.value for s in SessionStatus}
         assert actual == expected
 
@@ -222,6 +225,67 @@ class TestModelConfig:
         assert restored.temperature == 0.7
         assert restored.enabled is False
         assert restored.review_focus == ["perf"]
+
+
+class TestIssueResponseAction:
+    def test_values(self):
+        assert IssueResponseAction.ACCEPT == "accept"
+        assert IssueResponseAction.DISPUTE == "dispute"
+        assert IssueResponseAction.PARTIAL == "partial"
+
+    def test_from_string(self):
+        assert IssueResponseAction("accept") == IssueResponseAction.ACCEPT
+        assert IssueResponseAction("dispute") == IssueResponseAction.DISPUTE
+        assert IssueResponseAction("partial") == IssueResponseAction.PARTIAL
+
+
+class TestIssueResponse:
+    def test_creation(self):
+        ir = IssueResponse(issue_id="abc123", action=IssueResponseAction.ACCEPT)
+        assert ir.issue_id == "abc123"
+        assert ir.action == IssueResponseAction.ACCEPT
+        assert ir.reasoning == ""
+        assert ir.proposed_change == ""
+        assert ir.submitted_by == ""
+        assert ir.submitted_at is not None
+
+    def test_all_fields(self):
+        ir = IssueResponse(
+            issue_id="abc123",
+            action=IssueResponseAction.DISPUTE,
+            reasoning="This is not a real bug",
+            proposed_change="Remove the check",
+            submitted_by="coding-agent",
+        )
+        assert ir.reasoning == "This is not a real bug"
+        assert ir.proposed_change == "Remove the check"
+        assert ir.submitted_by == "coding-agent"
+
+    def test_serialization_roundtrip(self):
+        ir = IssueResponse(
+            issue_id="def456",
+            action=IssueResponseAction.PARTIAL,
+            reasoning="Partially valid",
+        )
+        data = ir.model_dump(mode="json")
+        restored = IssueResponse.model_validate(data)
+        assert restored.issue_id == "def456"
+        assert restored.action == IssueResponseAction.PARTIAL
+        assert restored.reasoning == "Partially valid"
+
+    def test_session_default_empty(self):
+        session = ReviewSession()
+        assert session.issue_responses == []
+
+    def test_backward_compat_old_json(self):
+        """Old session JSON without issue_responses deserializes fine."""
+        data = {"id": "old123", "base": "main", "status": "idle"}
+        session = ReviewSession.model_validate(data)
+        assert session.issue_responses == []
+
+    def test_agent_task_type_agent_response(self):
+        assert AgentTaskType.AGENT_RESPONSE == "agent_response"
+        assert AgentTaskType("agent_response") == AgentTaskType.AGENT_RESPONSE
 
 
 class TestAgentActivity:

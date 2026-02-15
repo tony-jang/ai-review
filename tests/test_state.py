@@ -22,6 +22,9 @@ class TestTransitions:
             (SessionStatus.REVIEWING, SessionStatus.DEDUP),
             (SessionStatus.DEDUP, SessionStatus.DELIBERATING),
             (SessionStatus.DELIBERATING, SessionStatus.COMPLETE),
+            (SessionStatus.DELIBERATING, SessionStatus.AGENT_RESPONSE),
+            (SessionStatus.AGENT_RESPONSE, SessionStatus.DELIBERATING),
+            (SessionStatus.AGENT_RESPONSE, SessionStatus.COMPLETE),
         ],
     )
     def test_valid_transitions(self, from_status, to_status):
@@ -63,6 +66,9 @@ class TestInvalidTransitions:
             (SessionStatus.REVIEWING, SessionStatus.COLLECTING),
             (SessionStatus.COMPLETE, SessionStatus.IDLE),
             (SessionStatus.COMPLETE, SessionStatus.REVIEWING),
+            (SessionStatus.AGENT_RESPONSE, SessionStatus.REVIEWING),
+            (SessionStatus.AGENT_RESPONSE, SessionStatus.IDLE),
+            (SessionStatus.AGENT_RESPONSE, SessionStatus.DEDUP),
         ],
     )
     def test_invalid_transitions_raise(self, from_status, to_status):
@@ -79,6 +85,22 @@ class TestInvalidTransitions:
             session = ReviewSession(status=status)
             with pytest.raises(InvalidTransitionError):
                 transition(session, status)
+
+    def test_lifecycle_with_agent_response(self):
+        session = ReviewSession()
+        transition(session, SessionStatus.COLLECTING)
+        transition(session, SessionStatus.REVIEWING)
+        transition(session, SessionStatus.DEDUP)
+        transition(session, SessionStatus.DELIBERATING)
+        transition(session, SessionStatus.AGENT_RESPONSE)
+        assert session.status == SessionStatus.AGENT_RESPONSE
+        transition(session, SessionStatus.COMPLETE)
+        assert session.status == SessionStatus.COMPLETE
+
+    def test_agent_response_to_deliberating_for_dispute(self):
+        session = ReviewSession(status=SessionStatus.AGENT_RESPONSE)
+        transition(session, SessionStatus.DELIBERATING)
+        assert session.status == SessionStatus.DELIBERATING
 
     def test_deliberating_self_transition(self):
         session = ReviewSession(status=SessionStatus.DELIBERATING)
