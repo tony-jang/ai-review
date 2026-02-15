@@ -23,6 +23,8 @@ from ai_review.models import (
     DiffFile,
     ImplementationContext,
     Issue,
+    IssueResponse,
+    IssueResponseAction,
     Knowledge,
     MergeDecision,
     ModelConfig,
@@ -57,6 +59,7 @@ class SessionManager:
         # When None the manager behaves as before (manual mode).
         self.on_review_submitted: Callable[[str, str], Any] | None = None  # (session_id, model_id)
         self.on_opinion_submitted: Callable[[str, str, str], Any] | None = None  # (session_id, issue_id, model_id)
+        self.on_issue_responded: Callable[[str, str, str], Any] | None = None  # (session_id, issue_id, action)
         self._load_state()
 
     @property
@@ -793,6 +796,124 @@ class SessionManager:
         """Get all issues for a session."""
         session = self.get_session(session_id)
         return [i.model_dump(mode="json") for i in session.issues]
+
+    def get_confirmed_issues(self, session_id: str) -> dict:
+        """Get issues with consensus_type == 'fix_required'."""
+        session = self.get_session(session_id)
+        confirmed = []
+        dismissed = 0
+        undecided = 0
+        for issue in session.issues:
+            if issue.consensus_type == "fix_required":
+                # Build consensus summary from thread
+                fix_count = sum(1 for op in issue.thread if op.action == OpinionAction.FIX_REQUIRED)
+                no_fix_count = sum(1 for op in issue.thread if op.action == OpinionAction.NO_FIX)
+                consensus_summary = f"{fix_count} fix_required, {no_fix_count} no_fix"
+                confirmed.append({
+                    "id": issue.id,
+                    "title": issue.title,
+                    "severity": issue.severity.value,
+                    "file": issue.file,
+                    "line_start": issue.line_start,
+                    "line_end": issue.line_end,
+                    "description": issue.description,
+                    "suggestion": issue.suggestion,
+                    "consensus_summary": consensus_summary,
+                })
+            elif issue.consensus_type == "dismissed":
+                dismissed += 1
+            else:
+                undecided += 1
+        return {
+            "issues": confirmed,
+            "session_id": session_id,
+            "total_confirmed": len(confirmed),
+            "total_dismissed": dismissed,
+            "total_undecided": undecided,
+        }
+
+    def submit_issue_response(
+        self,
+        session_id: str,
+        issue_id: str,
+        action: str,
+        reasoning: str = "",
+        proposed_change: str = "",
+        submitted_by: str = "",
+    ) -> dict:
+        """Submit a coding agent's response to a confirmed issue."""
+        session = self.get_session(session_id)
+        if session.status not in (SessionStatus.AGENT_RESPONSE, SessionStatus.DELIBERATING):
+            raise ValueError(f"Cannot submit issue response in {session.status.value} state")
+
+        # Find the issue
+        issue = None
+        for i in session.issues:
+            if i.id == issue_id:
+                issue = i
+                break
+        if issue is None:
+            raise KeyError(f"Issue not found: {issue_id}")
+
+        # Reject duplicate response
+        if any(r.issue_id == issue_id for r in session.issue_responses):
+            raise ValueError(f"Duplicate response for issue: {issue_id}")
+
+        response_action = IssueResponseAction(action)
+        ir = IssueResponse(
+            issue_id=issue_id,
+            action=response_action,
+            reasoning=reasoning,
+            proposed_change=proposed_change,
+            submitted_by=submitted_by,
+        )
+        session.issue_responses.append(ir)
+
+        # For dispute: reset consensus and add NO_FIX opinion
+        if response_action == IssueResponseAction.DISPUTE:
+            issue.turn += 1
+            issue.consensus = False
+            issue.consensus_type = None
+            issue.final_severity = None
+            opinion = Opinion(
+                model_id=submitted_by or "coding-agent",
+                action=OpinionAction.NO_FIX,
+                reasoning=f"[DISPUTE] {reasoning}",
+                turn=issue.turn,
+            )
+            issue.thread.append(opinion)
+
+        self.broker.publish("issue_response", {
+            "session_id": session_id,
+            "issue_id": issue_id,
+            "action": action,
+            "submitted_by": submitted_by,
+        })
+
+        if self.on_issue_responded is not None:
+            self.on_issue_responded(session_id, issue_id, action)
+
+        self.persist()
+        return {
+            "status": "accepted",
+            "issue_id": issue_id,
+            "action": action,
+        }
+
+    def get_issue_response_status(self, session_id: str) -> dict:
+        """Get the status of issue responses for a session."""
+        session = self.get_session(session_id)
+        confirmed_ids = {
+            i.id for i in session.issues if i.consensus_type == "fix_required"
+        }
+        responded_ids = {r.issue_id for r in session.issue_responses}
+        pending_ids = sorted(confirmed_ids - responded_ids)
+        return {
+            "total_confirmed": len(confirmed_ids),
+            "total_responded": len(responded_ids & confirmed_ids),
+            "pending_ids": pending_ids,
+            "all_responded": len(pending_ids) == 0 and len(confirmed_ids) > 0,
+        }
 
     def get_issue_thread(self, session_id: str, issue_id: str) -> dict:
         """Get a specific issue with its thread."""

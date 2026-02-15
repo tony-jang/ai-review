@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from ai_review.models import AgentState, AgentStatus, DiffFile, ModelConfig, SessionStatus, Severity, _utcnow
+from ai_review.models import AgentState, AgentStatus, DiffFile, IssueResponseAction, ModelConfig, OpinionAction, SessionStatus, Severity, _utcnow
 from ai_review.session_manager import SessionManager
 
 
@@ -957,3 +957,256 @@ class TestAgentElapsed:
         ticking = manager.get_agent_runtime(sid, "codex")["elapsed_seconds"]
         assert ticking is not None
         assert ticking > frozen_2
+
+
+def _setup_confirmed_session(manager):
+    """Helper: create a session with confirmed issues."""
+    import asyncio
+    from ai_review.consensus import apply_consensus
+
+    loop = asyncio.get_event_loop()
+    start = loop.run_until_complete(manager.start_review())
+    sid = start["session_id"]
+    manager.submit_review(
+        sid, "opus",
+        [
+            {"title": "SQL injection", "severity": "critical", "file": "db.py", "description": "raw sql"},
+            {"title": "Minor style", "severity": "low", "file": "style.py", "description": "naming"},
+        ],
+    )
+    manager.submit_review(
+        sid, "gpt",
+        [
+            {"title": "SQL injection dupe", "severity": "high", "file": "db.py", "description": "raw sql"},
+        ],
+    )
+    issues = manager.create_issues_from_reviews(sid)
+    session = manager.get_session(sid)
+
+    # Submit opinions to reach consensus
+    for issue in issues:
+        for model in ["opus", "gpt"]:
+            if issue.raised_by != model:
+                manager.submit_opinion(
+                    sid, issue.id, model,
+                    "fix_required", "확인", "high",
+                )
+
+    apply_consensus(issues, session.config.consensus_threshold)
+    session.status = SessionStatus.AGENT_RESPONSE
+    manager.persist()
+    return sid, session
+
+
+class TestGetConfirmedIssues:
+    @pytest.mark.asyncio
+    async def test_returns_only_fix_required(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issues[0].consensus = True
+        issues[0].consensus_type = "fix_required"
+        issues[0].final_severity = Severity.HIGH
+
+        result = manager.get_confirmed_issues(sid)
+        assert result["total_confirmed"] == 1
+        assert result["issues"][0]["title"] == "Bug"
+        assert "consensus_summary" in result["issues"][0]
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_fix_required(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issues[0].consensus = True
+        issues[0].consensus_type = "dismissed"
+
+        result = manager.get_confirmed_issues(sid)
+        assert result["total_confirmed"] == 0
+        assert result["total_dismissed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_consensus_summary_in_result(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issues[0].consensus_type = "fix_required"
+        # thread has one RAISE opinion already
+        result = manager.get_confirmed_issues(sid)
+        assert "consensus_summary" in result["issues"][0]
+
+
+class TestSubmitIssueResponse:
+    @pytest.mark.asyncio
+    async def test_accept(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue = issues[0]
+        issue.consensus_type = "fix_required"
+        session = manager.get_session(sid)
+        session.status = SessionStatus.AGENT_RESPONSE
+
+        result = manager.submit_issue_response(sid, issue.id, "accept", "Will fix")
+        assert result["status"] == "accepted"
+        assert result["action"] == "accept"
+        assert len(session.issue_responses) == 1
+
+    @pytest.mark.asyncio
+    async def test_dispute_adds_no_fix_opinion(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue = issues[0]
+        issue.consensus_type = "fix_required"
+        session = manager.get_session(sid)
+        session.status = SessionStatus.AGENT_RESPONSE
+        original_turn = issue.turn
+
+        result = manager.submit_issue_response(
+            sid, issue.id, "dispute", "Not a real bug", submitted_by="coding-agent"
+        )
+        assert result["status"] == "accepted"
+        assert issue.turn == original_turn + 1
+        assert issue.consensus is False
+        assert issue.consensus_type is None
+        assert issue.final_severity is None
+        # Thread should have a NO_FIX opinion with [DISPUTE] prefix
+        last_opinion = issue.thread[-1]
+        assert last_opinion.action == OpinionAction.NO_FIX
+        assert "[DISPUTE]" in last_opinion.reasoning
+
+    @pytest.mark.asyncio
+    async def test_partial(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue = issues[0]
+        issue.consensus_type = "fix_required"
+        session = manager.get_session(sid)
+        session.status = SessionStatus.AGENT_RESPONSE
+
+        result = manager.submit_issue_response(
+            sid, issue.id, "partial", "Partially fixed", proposed_change="Changed X"
+        )
+        assert result["status"] == "accepted"
+        assert result["action"] == "partial"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_rejected(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue = issues[0]
+        issue.consensus_type = "fix_required"
+        session = manager.get_session(sid)
+        session.status = SessionStatus.AGENT_RESPONSE
+
+        manager.submit_issue_response(sid, issue.id, "accept", "ok")
+        with pytest.raises(ValueError, match="Duplicate"):
+            manager.submit_issue_response(sid, issue.id, "accept", "again")
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_issue_raises(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        session = manager.get_session(sid)
+        session.status = SessionStatus.AGENT_RESPONSE
+
+        with pytest.raises(KeyError, match="Issue not found"):
+            manager.submit_issue_response(sid, "nonexistent", "accept")
+
+    @pytest.mark.asyncio
+    async def test_wrong_state_raises(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        session = manager.get_session(sid)
+        session.status = SessionStatus.COMPLETE
+
+        with pytest.raises(ValueError, match="Cannot submit issue response"):
+            manager.submit_issue_response(sid, "any", "accept")
+
+    @pytest.mark.asyncio
+    async def test_callback_called(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue = issues[0]
+        issue.consensus_type = "fix_required"
+        session = manager.get_session(sid)
+        session.status = SessionStatus.AGENT_RESPONSE
+
+        callback_args = []
+        manager.on_issue_responded = lambda sid, iid, action: callback_args.append((sid, iid, action))
+
+        manager.submit_issue_response(sid, issue.id, "accept", "ok")
+        assert len(callback_args) == 1
+        assert callback_args[0] == (sid, issue.id, "accept")
+
+
+class TestGetIssueResponseStatus:
+    @pytest.mark.asyncio
+    async def test_tracking(self, manager):
+        start = await manager.start_review()
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [
+                {"title": "Bug A", "severity": "high", "file": "a.py", "description": "d"},
+                {"title": "Bug B", "severity": "medium", "file": "b.py", "description": "d"},
+            ],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        for issue in issues:
+            issue.consensus_type = "fix_required"
+        session = manager.get_session(sid)
+        session.status = SessionStatus.AGENT_RESPONSE
+
+        status = manager.get_issue_response_status(sid)
+        assert status["total_confirmed"] == 2
+        assert status["total_responded"] == 0
+        assert status["all_responded"] is False
+        assert len(status["pending_ids"]) == 2
+
+        manager.submit_issue_response(sid, issues[0].id, "accept", "ok")
+        status = manager.get_issue_response_status(sid)
+        assert status["total_responded"] == 1
+        assert status["all_responded"] is False
+
+        manager.submit_issue_response(sid, issues[1].id, "accept", "ok")
+        status = manager.get_issue_response_status(sid)
+        assert status["total_responded"] == 2
+        assert status["all_responded"] is True
+        assert len(status["pending_ids"]) == 0

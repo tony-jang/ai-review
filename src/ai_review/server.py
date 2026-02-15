@@ -669,6 +669,42 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(e))
 
     # ------------------------------------------------------------------
+    # Issue Responses (Agent Response Protocol)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/sessions/{session_id}/confirmed-issues")
+    async def api_get_confirmed_issues(session_id: str):
+        try:
+            return JSONResponse(manager.get_confirmed_issues(session_id))
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.post("/api/sessions/{session_id}/issues/{issue_id}/respond")
+    async def api_submit_issue_response(session_id: str, issue_id: str, request: Request):
+        body = await request.json()
+        try:
+            result = manager.submit_issue_response(
+                session_id,
+                issue_id,
+                body["action"],
+                body.get("reasoning", ""),
+                body.get("proposed_change", ""),
+                body.get("submitted_by", ""),
+            )
+            return JSONResponse(result)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api/sessions/{session_id}/issue-responses")
+    async def api_get_issue_response_status(session_id: str):
+        try:
+            return JSONResponse(manager.get_issue_response_status(session_id))
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    # ------------------------------------------------------------------
     # Agents — "current" routes MUST be registered before {session_id}
     # to prevent FastAPI from matching "current" as a session_id param.
     # ------------------------------------------------------------------

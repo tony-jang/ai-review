@@ -8,6 +8,7 @@ import re
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from ai_review.models import SessionStatus
 from ai_review.server import create_app
 from ai_review.trigger.base import TriggerResult
 
@@ -976,3 +977,112 @@ class TestServerOrchestrator:
             "summary": "too late",
         })
         assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_confirmed_issues_endpoint(self, app, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "a",
+            "issues": [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        })
+        await client.post(f"/api/sessions/{sid}/process")
+
+        # Set consensus_type on the issue
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+
+        resp = await client.get(f"/api/sessions/{sid}/confirmed-issues")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_confirmed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_issue_respond_accept(self, app, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "a",
+            "issues": [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        })
+        await client.post(f"/api/sessions/{sid}/process")
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+        session.status = SessionStatus.AGENT_RESPONSE
+        issue_id = session.issues[0].id
+
+        resp = await client.post(f"/api/sessions/{sid}/issues/{issue_id}/respond", json={
+            "action": "accept",
+            "reasoning": "Will fix",
+        })
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "accepted"
+
+    @pytest.mark.asyncio
+    async def test_issue_respond_dispute(self, app, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "a",
+            "issues": [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        })
+        await client.post(f"/api/sessions/{sid}/process")
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+        session.status = SessionStatus.AGENT_RESPONSE
+        issue_id = session.issues[0].id
+
+        resp = await client.post(f"/api/sessions/{sid}/issues/{issue_id}/respond", json={
+            "action": "dispute",
+            "reasoning": "Not a real bug",
+        })
+        assert resp.status_code == 200
+        assert resp.json()["action"] == "dispute"
+
+    @pytest.mark.asyncio
+    async def test_issue_respond_invalid_action(self, app, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "a",
+            "issues": [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        })
+        await client.post(f"/api/sessions/{sid}/process")
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        session.issues[0].consensus_type = "fix_required"
+        session.status = SessionStatus.AGENT_RESPONSE
+        issue_id = session.issues[0].id
+
+        resp = await client.post(f"/api/sessions/{sid}/issues/{issue_id}/respond", json={
+            "action": "invalid_action",
+            "reasoning": "test",
+        })
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_issue_respond_nonexistent(self, app, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        session.status = SessionStatus.AGENT_RESPONSE
+
+        resp = await client.post(f"/api/sessions/{sid}/issues/nonexistent/respond", json={
+            "action": "accept",
+        })
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_issue_responses_status(self, app, client):
+        resp = await client.post("/api/sessions", json={"base": "main"})
+        sid = resp.json()["session_id"]
+
+        resp = await client.get(f"/api/sessions/{sid}/issue-responses")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_confirmed"] == 0
