@@ -19,13 +19,17 @@ _SEVERITY_ORDER: dict[Severity, int] = {
 }
 
 
-def check_consensus(issue: Issue, threshold: float = 2.0) -> bool:
+def check_consensus(
+    issue: Issue, threshold: float = 2.0, *, total_voters: int = 0,
+) -> bool:
     """Check if an issue has reached consensus via weighted voting.
 
     Each model's first decisive vote (RAISE/FIX_REQUIRED or NO_FIX) is counted
     with its confidence as weight.  COMMENT votes are excluded from the tally.
 
     Returns True if weighted fix_required >= threshold OR weighted no_fix >= threshold.
+    When *total_voters* > 0 and all voters have responded, returns True unconditionally
+    (majority fallback to prevent deadlock when confidence weights are too low).
     """
     if not issue.thread:
         return False
@@ -44,7 +48,14 @@ def check_consensus(issue: Issue, threshold: float = 2.0) -> bool:
             weighted_no_fix += max(0.0, min(op.confidence, 1.0))
             voters.add(op.model_id)
 
-    return weighted_fix >= threshold or weighted_no_fix >= threshold
+    if weighted_fix >= threshold or weighted_no_fix >= threshold:
+        return True
+
+    # Majority fallback: all voters responded but threshold not met
+    if total_voters > 0 and len(voters) >= total_voters:
+        return True
+
+    return False
 
 
 def determine_consensus_type(issue: Issue) -> str:
@@ -112,10 +123,19 @@ def determine_final_severity(issue: Issue) -> Severity:
     return issue.severity
 
 
-def apply_consensus(issues: list[Issue], threshold: int | float = 2) -> list[Issue]:
+def apply_consensus(
+    issues: list[Issue],
+    threshold: int | float = 2,
+    *,
+    total_voters: int = 0,
+) -> list[Issue]:
     """Apply consensus checks to all issues and set final severity + consensus_type."""
     for issue in issues:
-        issue.consensus = check_consensus(issue, float(threshold))
+        if issue.consensus and issue.consensus_type == "closed":
+            continue  # already closed via WITHDRAW — skip
+        issue.consensus = check_consensus(
+            issue, float(threshold), total_voters=total_voters,
+        )
         if issue.consensus:
             issue.consensus_type = determine_consensus_type(issue)
             issue.final_severity = determine_final_severity(issue)

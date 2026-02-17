@@ -42,6 +42,7 @@ class Orchestrator:
         manager.on_opinion_submitted = self._on_opinion_submitted
         manager.on_issue_responded = self._on_issue_responded
         manager.on_fix_completed = self._on_fix_completed
+        manager.on_issue_dismissed = self._on_issue_dismissed
 
     # --- Public API ---
 
@@ -150,7 +151,8 @@ class Orchestrator:
         self.manager.on_opinion_submitted = None
         self.manager.on_issue_responded = None
         self.manager.on_fix_completed = None
-        self.manager.persist()
+        self.manager.on_issue_dismissed = None
+        await self.manager.flush()
 
     async def stop_session(self, session_id: str) -> None:
         """Cancel pending tasks and close triggers for a single session."""
@@ -321,7 +323,7 @@ class Orchestrator:
         )
         if finished >= expected and len(session.reviews) > 0:
             logger.info("All %d agents finished (%d reviews) — advancing", expected, len(session.reviews))
-            asyncio.ensure_future(self._advance_to_deliberation(session_id))
+            self._safe_fire_and_forget(self._advance_to_deliberation(session_id), name=f"advance-{session_id[:8]}")
 
     def _on_opinion_submitted(self, session_id: str, issue_id: str, model_id: str) -> None:
         """Called after each opinion. Re-checks consensus and triggers next round or finishes."""
@@ -331,20 +333,20 @@ class Orchestrator:
 
         session = self.manager.get_session(session_id)
         if session.status == SessionStatus.VERIFYING:
-            asyncio.ensure_future(self._check_verification_complete(session_id))
+            self._safe_fire_and_forget(self._check_verification_complete(session_id), name=f"verify-check-{session_id[:8]}")
             return
 
         if model_id in human_like:
             # Human comment opens a new turn on the issue. Re-trigger pending agents immediately.
-            asyncio.ensure_future(self._trigger_deliberation_round(session_id))
-        asyncio.ensure_future(self._check_and_advance(session_id))
+            self._safe_fire_and_forget(self._trigger_deliberation_round(session_id), name=f"delib-round-{session_id[:8]}")
+        self._safe_fire_and_forget(self._check_and_advance(session_id), name=f"check-advance-{session_id[:8]}")
 
     def _on_issue_responded(self, session_id: str, issue_id: str, action: str) -> None:
         """Called after a coding agent submits a response to an issue."""
         if action == IssueResponseAction.DISPUTE.value:
-            asyncio.ensure_future(self._handle_dispute_redeliberation(session_id))
+            self._safe_fire_and_forget(self._handle_dispute_redeliberation(session_id), name=f"dispute-{session_id[:8]}")
         else:
-            asyncio.ensure_future(self._check_all_responses_complete(session_id))
+            self._safe_fire_and_forget(self._check_all_responses_complete(session_id), name=f"resp-check-{session_id[:8]}")
 
     async def _handle_dispute_redeliberation(self, session_id: str) -> None:
         """Handle dispute: clear responses and re-enter deliberation."""
@@ -385,20 +387,45 @@ class Orchestrator:
 
     def _on_fix_completed(self, session_id: str) -> None:
         """Called after a fix commit is submitted. Starts verification."""
-        asyncio.ensure_future(self._start_verification(session_id))
+        self._safe_fire_and_forget(self._start_verification(session_id), name=f"start-verify-{session_id[:8]}")
+
+    def _on_issue_dismissed(self, session_id: str, issue_id: str) -> None:
+        """Called after an issue is dismissed. If all fix_required issues are dismissed, finish."""
+        session = self.manager.get_session(session_id)
+        if session.status != SessionStatus.FIXING:
+            return
+        fix_required = [i for i in session.issues if i.consensus_type == "fix_required"]
+        dismissed_ids = {d.issue_id for d in session.dismissals}
+        if all(i.id in dismissed_ids for i in fix_required):
+            self._safe_fire_and_forget(self._finish(session_id), name=f"finish-{session_id[:8]}")
 
     async def _start_verification(self, session_id: str) -> None:
-        """Send verification prompts to all enabled models for delta review."""
+        """Send verification prompts only to original reporters of fix_required issues."""
         session = self.manager.get_session(session_id)
         if session.status != SessionStatus.VERIFYING:
             return
 
-        # Increment issue turns so verification opinions have a distinct turn
-        for issue in session.issues:
-            if issue.consensus_type == "fix_required":
-                issue.turn += 1
+        dismissed_ids = {d.issue_id for d in session.dismissals}
 
-        for mc in (m for m in session.config.models if m.enabled):
+        # Build reporter → issue_ids mapping
+        reporter_issues: dict[str, list[str]] = {}
+        for issue in session.issues:
+            if issue.consensus_type != "fix_required":
+                continue
+            if issue.id in dismissed_ids:
+                continue
+            issue.turn += 1
+            reporter_issues.setdefault(issue.raised_by, []).append(issue.id)
+
+        if not reporter_issues:
+            await self._finish(session_id)
+            return
+
+        # Send verification prompts to each original reporter only
+        for model_id, issue_ids in reporter_issues.items():
+            mc = next((m for m in session.config.models if m.id == model_id and m.enabled), None)
+            if mc is None:
+                continue
             agent_key = self.manager.ensure_agent_access_key(session_id, mc.id)
             prompt = build_verification_prompt(
                 session_id=session_id,
@@ -406,6 +433,7 @@ class Orchestrator:
                 api_base_url=self.api_base_url,
                 verification_round=session.verification_round,
                 agent_key=agent_key,
+                issue_ids=issue_ids,
             )
 
             # Update agent state for verification
@@ -452,30 +480,42 @@ class Orchestrator:
         self.manager.persist()
 
     async def _check_verification_complete(self, session_id: str) -> None:
-        """Check if all verification opinions are in. Decide next state."""
+        """Check if original reporters' verification opinions are in. Decide next state."""
         session = self.manager.get_session(session_id)
         if session.status != SessionStatus.VERIFYING:
             return
 
-        # Check if all verification agents have finished (not REVIEWING)
-        enabled_ids = {m.id for m in session.config.models if m.enabled}
-        for mid in enabled_ids:
+        dismissed_ids = {d.issue_id for d in session.dismissals}
+
+        # Only check original reporters (not all agents)
+        reporter_ids: set[str] = set()
+        for issue in session.issues:
+            if issue.consensus_type == "fix_required" and issue.id not in dismissed_ids:
+                reporter_ids.add(issue.raised_by)
+
+        # Check if all reporter agents have finished (not REVIEWING)
+        for mid in reporter_ids:
             agent = session.agent_states.get(mid)
             if agent and agent.task_type == AgentTaskType.VERIFICATION:
                 if agent.status == AgentStatus.REVIEWING:
                     return  # Still working
 
-        # All agents done. Check if original issues are resolved.
+        # All reporters done. Check if issues are resolved by their reporters.
         confirmed_issues = [
-            i for i in session.issues if i.consensus_type == "fix_required"
+            i for i in session.issues
+            if i.consensus_type == "fix_required" and i.id not in dismissed_ids
         ]
         all_resolved = True
         for issue in confirmed_issues:
-            verification_opinions = [
+            reporter_opinions = [
                 op for op in issue.thread
-                if op.turn == issue.turn and op.action != OpinionAction.RAISE
+                if op.turn == issue.turn and op.model_id == issue.raised_by and op.action != OpinionAction.RAISE
             ]
-            if any(op.action == OpinionAction.FIX_REQUIRED for op in verification_opinions):
+            if any(op.action == OpinionAction.FIX_REQUIRED for op in reporter_opinions):
+                all_resolved = False
+                break
+            if not reporter_opinions:
+                # Reporter hasn't opined yet
                 all_resolved = False
                 break
 
@@ -498,6 +538,10 @@ class Orchestrator:
 
     # --- Internal flow ---
 
+    @staticmethod
+    def _enabled_model_count(session) -> int:
+        return sum(1 for m in session.config.models if m.enabled)
+
     async def _advance_to_deliberation(self, session_id: str) -> None:
         """Transition through DEDUP → DELIBERATING and trigger first deliberation round."""
         session = self.manager.get_session(session_id)
@@ -515,7 +559,10 @@ class Orchestrator:
             deduped = deduplicate_issues(issues)
             session.issues = deduped
 
-        apply_consensus(session.issues, session.config.consensus_threshold)
+        apply_consensus(
+            session.issues, session.config.consensus_threshold,
+            total_voters=self._enabled_model_count(session),
+        )
 
         # Check if already all consensus
         if all(i.consensus for i in session.issues):
@@ -603,18 +650,12 @@ class Orchestrator:
         self.manager.persist()
 
     async def _check_and_advance(self, session_id: str) -> None:
-        """Re-apply consensus. If all resolved or max turns, finish. Else next round."""
+        """Single-round cross-review: after all agents respond, go to FIXING or COMPLETE."""
         session = self.manager.get_session(session_id)
-        apply_consensus(session.issues, session.config.consensus_threshold)
-
-        # Determine current turn (max turn across issues)
-        max_turn = max((i.turn for i in session.issues), default=0)
-
-        all_consensus = all(i.consensus for i in session.issues)
-
-        if all_consensus or max_turn >= session.config.max_turns:
-            await self._try_agent_response_or_finish(session_id)
-            return
+        apply_consensus(
+            session.issues, session.config.consensus_threshold,
+            total_voters=self._enabled_model_count(session),
+        )
 
         # Check if all models have responded in this round
         all_responded = True
@@ -624,39 +665,47 @@ class Orchestrator:
                 all_responded = False
                 break
 
-        if all_responded:
-            # Increment turn for all non-consensus issues
-            for issue in session.issues:
-                if not issue.consensus:
-                    issue.turn += 1
-
-            # Self-transition for next deliberation round
-            if can_transition(session, SessionStatus.DELIBERATING):
-                transition(session, SessionStatus.DELIBERATING)
-
-            apply_consensus(session.issues, session.config.consensus_threshold)
-
-            if all(i.consensus for i in session.issues):
-                await self._try_agent_response_or_finish(session_id)
-            else:
-                await self._trigger_deliberation_round(session_id)
+        if not all_responded:
+            await self._trigger_deliberation_round(session_id)
+            self.manager.persist()
             return
 
-        # Not all responded yet. Ensure non-busy pending agents are triggered.
-        await self._trigger_deliberation_round(session_id)
+        # Single round complete. Transition to FIXING or COMPLETE.
+        has_fix_required = any(
+            i.consensus_type == "fix_required" for i in session.issues
+        )
+        if has_fix_required and can_transition(session, SessionStatus.FIXING):
+            transition(session, SessionStatus.FIXING)
+            self.manager.broker.publish(
+                "phase_change", {"status": "fixing", "session_id": session_id}
+            )
+        else:
+            await self._finish(session_id)
         self.manager.persist()
 
     async def _try_agent_response_or_finish(self, session_id: str) -> None:
-        """Transition to AGENT_RESPONSE if there are confirmed issues, otherwise finish."""
+        """Backward compat: transition to FIXING if confirmed issues, otherwise finish.
+
+        Kept for AGENT_RESPONSE state backward compatibility.
+        New flow uses _check_and_advance() which goes DELIBERATING → FIXING directly.
+        """
         session = self.manager.get_session(session_id)
         has_confirmed = any(i.consensus_type == "fix_required" for i in session.issues)
-        if has_confirmed and can_transition(session, SessionStatus.AGENT_RESPONSE):
-            transition(session, SessionStatus.AGENT_RESPONSE)
-            self.manager.broker.publish(
-                "phase_change", {"status": "agent_response", "session_id": session_id}
-            )
-            self.manager.persist()
-            return
+        if has_confirmed:
+            if can_transition(session, SessionStatus.FIXING):
+                transition(session, SessionStatus.FIXING)
+                self.manager.broker.publish(
+                    "phase_change", {"status": "fixing", "session_id": session_id}
+                )
+                self.manager.persist()
+                return
+            if can_transition(session, SessionStatus.AGENT_RESPONSE):
+                transition(session, SessionStatus.AGENT_RESPONSE)
+                self.manager.broker.publish(
+                    "phase_change", {"status": "agent_response", "session_id": session_id}
+                )
+                self.manager.persist()
+                return
         await self._finish(session_id)
 
     async def _finish(self, session_id: str) -> None:
@@ -664,7 +713,10 @@ class Orchestrator:
         session = self.manager.get_session(session_id)
 
         # Ensure final consensus is applied
-        apply_consensus(session.issues, session.config.consensus_threshold)
+        apply_consensus(
+            session.issues, session.config.consensus_threshold,
+            total_voters=self._enabled_model_count(session),
+        )
 
         if can_transition(session, SessionStatus.COMPLETE):
             transition(session, SessionStatus.COMPLETE)
@@ -676,6 +728,26 @@ class Orchestrator:
         self.manager.persist()
 
     # --- Helpers ---
+
+    def _safe_fire_and_forget(self, coro, *, name: str = "") -> asyncio.Task:
+        """Create a task with automatic exception logging (replaces bare ensure_future)."""
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(self._log_task_exception)
+        return task
+
+    @staticmethod
+    def _log_task_exception(task: asyncio.Task) -> None:
+        """Done-callback that logs unhandled exceptions from fire-and-forget tasks."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "Unhandled exception in background task %r: %s",
+                task.get_name(),
+                exc,
+                exc_info=exc,
+            )
 
     def _create_trigger(self, client_type: str) -> TriggerEngine:
         """Factory for trigger engines."""
@@ -771,7 +843,7 @@ class Orchestrator:
                     if agent.task_type == AgentTaskType.VERIFICATION:
                         session = self.manager.get_session(session_id)
                         if session.status == SessionStatus.VERIFYING:
-                            asyncio.ensure_future(self._check_verification_complete(session_id))
+                            self._safe_fire_and_forget(self._check_verification_complete(session_id), name=f"verify-post-{session_id[:8]}")
                 else:
                     logger.warning("Trigger %s completed but no review submitted", model_id)
                     self._mark_agent_failed(session_id, model_id, "completed without submitting review")

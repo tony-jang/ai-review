@@ -277,3 +277,77 @@ class TestWeightedConsensus:
             reasoning="test",
         )
         assert op.confidence == 1.0
+
+
+class TestMajorityFallback:
+    """Tests for majority fallback when all voters responded but threshold not met."""
+
+    def test_all_voted_low_confidence_reaches_consensus(self):
+        """3 voters, all low confidence → threshold not met, but fallback triggers."""
+        opinions = [
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH, confidence=0.5),
+            _make_opinion("b", OpinionAction.FIX_REQUIRED, Severity.HIGH, confidence=0.4),
+            _make_opinion("c", OpinionAction.NO_FIX, confidence=0.3),
+        ]
+        issue = _make_issue_with_thread(opinions)
+        # Without fallback: 0.9 fix vs 0.3 no_fix — neither >= 2.0
+        assert check_consensus(issue, threshold=2.0) is False
+        # With fallback: all 3 voted, total_voters=3 → True
+        assert check_consensus(issue, threshold=2.0, total_voters=3) is True
+
+    def test_fallback_not_triggered_when_not_all_voted(self):
+        """2 of 3 voted → fallback should NOT trigger."""
+        opinions = [
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH, confidence=0.5),
+            _make_opinion("b", OpinionAction.FIX_REQUIRED, Severity.HIGH, confidence=0.4),
+        ]
+        issue = _make_issue_with_thread(opinions)
+        assert check_consensus(issue, threshold=2.0, total_voters=3) is False
+
+    def test_fallback_determines_correct_consensus_type(self):
+        """Majority fix votes → fix_required even with low confidence."""
+        opinions = [
+            _make_opinion("a", OpinionAction.RAISE, Severity.MEDIUM, confidence=0.5),
+            _make_opinion("b", OpinionAction.FIX_REQUIRED, Severity.MEDIUM, confidence=0.4),
+            _make_opinion("c", OpinionAction.NO_FIX, confidence=0.3),
+        ]
+        issue = _make_issue_with_thread(opinions)
+        assert check_consensus(issue, threshold=2.0, total_voters=3) is True
+        assert determine_consensus_type(issue) == "fix_required"
+
+    def test_fallback_majority_no_fix(self):
+        """Majority no_fix votes → dismissed."""
+        opinions = [
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH, confidence=0.3),
+            _make_opinion("b", OpinionAction.NO_FIX, confidence=0.4),
+            _make_opinion("c", OpinionAction.NO_FIX, confidence=0.5),
+        ]
+        issue = _make_issue_with_thread(opinions)
+        assert check_consensus(issue, threshold=2.0, total_voters=3) is True
+        assert determine_consensus_type(issue) == "dismissed"
+
+    def test_apply_consensus_with_total_voters(self):
+        """apply_consensus passes total_voters through."""
+        issue = _make_issue_with_thread([
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH, confidence=0.5),
+            _make_opinion("b", OpinionAction.FIX_REQUIRED, Severity.HIGH, confidence=0.4),
+            _make_opinion("c", OpinionAction.NO_FIX, confidence=0.3),
+        ])
+        # Without total_voters: no consensus
+        apply_consensus([issue], threshold=2.0)
+        assert issue.consensus is False
+
+        # With total_voters: consensus via fallback
+        apply_consensus([issue], threshold=2.0, total_voters=3)
+        assert issue.consensus is True
+        assert issue.consensus_type == "fix_required"
+
+    def test_fallback_zero_total_voters_disabled(self):
+        """total_voters=0 (default) disables fallback."""
+        opinions = [
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH, confidence=0.5),
+            _make_opinion("b", OpinionAction.FIX_REQUIRED, Severity.HIGH, confidence=0.4),
+            _make_opinion("c", OpinionAction.NO_FIX, confidence=0.3),
+        ]
+        issue = _make_issue_with_thread(opinions)
+        assert check_consensus(issue, threshold=2.0, total_voters=0) is False
