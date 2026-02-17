@@ -40,6 +40,8 @@ class OpinionAction(str, enum.Enum):
     FIX_REQUIRED = "fix_required"
     NO_FIX = "no_fix"
     COMMENT = "comment"
+    FALSE_POSITIVE = "false_positive"
+    WITHDRAW = "withdraw"
 
     # Backward compatibility aliases
     @classmethod
@@ -104,7 +106,12 @@ class Review(BaseModel):
 # --- Issue & Opinion ---
 
 
+def _opinion_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
 class Opinion(BaseModel):
+    id: str = Field(default_factory=_opinion_id)
     model_id: str
     action: OpinionAction
     reasoning: str
@@ -185,24 +192,6 @@ class AgentTaskType(str, enum.Enum):
     VERIFICATION = "verification"
 
 
-class MergeDecision(str, enum.Enum):
-    MERGEABLE = "mergeable"
-    NOT_MERGEABLE = "not_mergeable"
-    NEEDS_DISCUSSION = "needs_discussion"
-
-
-class OverallReview(BaseModel):
-    model_id: str
-    task_type: AgentTaskType = AgentTaskType.REVIEW
-    turn: int = 0
-    merge_decision: MergeDecision = MergeDecision.NEEDS_DISCUSSION
-    summary: str = ""
-    highlights: list[str] = Field(default_factory=list)
-    blockers: list[str] = Field(default_factory=list)
-    recommendations: list[str] = Field(default_factory=list)
-    submitted_at: datetime = Field(default_factory=_utcnow)
-
-
 class AgentState(BaseModel):
     model_id: str
     status: AgentStatus = AgentStatus.WAITING
@@ -259,6 +248,13 @@ class FixCommit(BaseModel):
 # --- Implementation Context ---
 
 
+class IssueDismissal(BaseModel):
+    issue_id: str
+    reasoning: str = ""
+    dismissed_by: str = ""
+    dismissed_at: datetime = Field(default_factory=_utcnow)
+
+
 class ImplementationContext(BaseModel):
     summary: str = ""
     decisions: list[str] = Field(default_factory=list)
@@ -281,7 +277,6 @@ class ReviewSession(BaseModel):
     diff: list[DiffFile] = Field(default_factory=list)
     knowledge: Knowledge = Field(default_factory=Knowledge)
     reviews: list[Review] = Field(default_factory=list)
-    overall_reviews: list[OverallReview] = Field(default_factory=list)
     issues: list[Issue] = Field(default_factory=list)
     agent_access_keys: dict[str, str] = Field(default_factory=dict)
     human_assist_access_key: str | None = None
@@ -291,6 +286,7 @@ class ReviewSession(BaseModel):
     agent_activities: list[AgentActivity] = Field(default_factory=list)
     issue_responses: list[IssueResponse] = Field(default_factory=list)
     fix_commits: list[FixCommit] = Field(default_factory=list)
+    dismissals: list[IssueDismissal] = Field(default_factory=list)
     verification_round: int = 0
     delta_diff: list[DiffFile] = Field(default_factory=list)
     implementation_context: ImplementationContext | None = None

@@ -1,5 +1,6 @@
 """Tests for SessionManager."""
 
+import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -10,33 +11,34 @@ from ai_review.session_manager import SessionManager
 
 
 @pytest.fixture
-def manager(tmp_path) -> SessionManager:
-    return SessionManager(repo_path=str(tmp_path))
+def manager(tmp_path, monkeypatch) -> SessionManager:
+    monkeypatch.chdir(tmp_path)
+    return SessionManager()
 
 
 class TestStartReview:
     @pytest.mark.asyncio
-    async def test_creates_session(self, manager):
-        result = await manager.start_review("main")
+    async def test_creates_session(self, manager, tmp_path):
+        result = await manager.start_review("main", repo_path=str(tmp_path), head="test-branch")
         assert "session_id" in result
         assert result["files_changed"] == 0  # no repo path
 
     @pytest.mark.asyncio
-    async def test_session_in_reviewing_state(self, manager):
-        result = await manager.start_review()
+    async def test_session_in_reviewing_state(self, manager, tmp_path):
+        result = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         session = manager.get_session(result["session_id"])
         assert session.status == SessionStatus.REVIEWING
 
     @pytest.mark.asyncio
-    async def test_current_session_set(self, manager):
-        await manager.start_review()
+    async def test_current_session_set(self, manager, tmp_path):
+        await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         assert manager.current_session is not None
 
 
 class TestSubmitReview:
     @pytest.mark.asyncio
-    async def test_submit(self, manager):
-        start = await manager.start_review()
+    async def test_submit(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.submit_review(
@@ -56,8 +58,8 @@ class TestSubmitReview:
         assert result["issue_count"] == 1
 
     @pytest.mark.asyncio
-    async def test_multiple_reviews(self, manager):
-        start = await manager.start_review()
+    async def test_multiple_reviews(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(sid, "opus", [], "No issues")
@@ -67,8 +69,8 @@ class TestSubmitReview:
         assert len(reviews) == 2
 
     @pytest.mark.asyncio
-    async def test_cannot_submit_in_wrong_state(self, manager):
-        start = await manager.start_review()
+    async def test_cannot_submit_in_wrong_state(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         session = manager.get_session(sid)
         session.status = SessionStatus.COMPLETE
@@ -77,82 +79,10 @@ class TestSubmitReview:
             manager.submit_review(sid, "opus", [], "")
 
 
-class TestOverallReview:
+class TestAccessKeys:
     @pytest.mark.asyncio
-    async def test_submit_and_update_same_turn(self, manager):
-        start = await manager.start_review()
-        sid = start["session_id"]
-
-        accepted = manager.submit_overall_review(
-            sid,
-            model_id="codex",
-            task_type="review",
-            turn=0,
-            merge_decision="needs_discussion",
-            summary="초기 판단",
-            highlights=["핵심 포인트"],
-        )
-        assert accepted["status"] == "accepted"
-        assert accepted["overall_review_count"] == 1
-
-        updated = manager.submit_overall_review(
-            sid,
-            model_id="codex",
-            task_type="review",
-            turn=0,
-            merge_decision="not_mergeable",
-            summary="결론: 머지 불가",
-            blockers=["성능 회귀"],
-        )
-        assert updated["status"] == "updated"
-        assert updated["overall_review_count"] == 1
-
-        reviews = manager.get_overall_reviews(sid)
-        assert len(reviews) == 1
-        assert reviews[0]["merge_decision"] == "not_mergeable"
-        assert reviews[0]["summary"] == "결론: 머지 불가"
-        assert reviews[0]["blockers"] == ["성능 회귀"]
-
-    @pytest.mark.asyncio
-    async def test_deliberation_default_turn_uses_current_issue_turn(self, manager):
-        start = await manager.start_review()
-        sid = start["session_id"]
-        manager.submit_review(
-            sid,
-            "opus",
-            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
-        )
-        issues = manager.create_issues_from_reviews(sid)
-        issues[0].turn = 2
-
-        result = manager.submit_overall_review(
-            sid,
-            model_id="gemini",
-            task_type="deliberation",
-            merge_decision="mergeable",
-            summary="턴 2 기준 머지 가능",
-        )
-        assert result["turn"] == 2
-
-    @pytest.mark.asyncio
-    async def test_session_status_includes_overall_review_meta(self, manager):
-        start = await manager.start_review()
-        sid = start["session_id"]
-        manager.submit_overall_review(
-            sid,
-            model_id="codex",
-            task_type="review",
-            turn=0,
-            merge_decision="needs_discussion",
-            summary="요약",
-        )
-        status = manager.get_session_status(sid)
-        assert status["overall_review_count"] == 1
-        assert status["current_turn"] == 0
-
-    @pytest.mark.asyncio
-    async def test_agent_access_key_is_stable_per_model(self, manager):
-        start = await manager.start_review()
+    async def test_agent_access_key_is_stable_per_model(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         k1 = manager.ensure_agent_access_key(sid, "codex")
         k2 = manager.ensure_agent_access_key(sid, "codex")
@@ -160,8 +90,8 @@ class TestOverallReview:
         assert len(k1) >= 32
 
     @pytest.mark.asyncio
-    async def test_human_assist_access_key_rotates(self, manager):
-        start = await manager.start_review()
+    async def test_human_assist_access_key_rotates(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         k1 = manager.issue_human_assist_access_key(sid)
         k2 = manager.issue_human_assist_access_key(sid)
@@ -174,7 +104,7 @@ class TestReadFile:
     @pytest.mark.asyncio
     async def test_read_file(self, manager, tmp_path):
         (tmp_path / "hello.py").write_text("line1\nline2\nline3\nline4\nline5\n")
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.read_file(sid, "hello.py")
@@ -186,7 +116,7 @@ class TestReadFile:
     @pytest.mark.asyncio
     async def test_read_file_with_range(self, manager, tmp_path):
         (tmp_path / "hello.py").write_text("\n".join(f"line{i}" for i in range(1, 11)))
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.read_file(sid, "hello.py", start=3, end=5)
@@ -196,15 +126,15 @@ class TestReadFile:
         assert result["lines"][0]["content"] == "line3"
 
     @pytest.mark.asyncio
-    async def test_read_file_not_found(self, manager):
-        start = await manager.start_review()
+    async def test_read_file_not_found(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         with pytest.raises(FileNotFoundError):
             manager.read_file(sid, "nonexistent.py")
 
     @pytest.mark.asyncio
-    async def test_read_file_outside_repo(self, manager):
-        start = await manager.start_review()
+    async def test_read_file_outside_repo(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         with pytest.raises(PermissionError):
             manager.read_file(sid, "../../etc/passwd")
@@ -216,7 +146,7 @@ class TestGetTree:
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("pass")
         (tmp_path / "README.md").write_text("hi")
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.get_tree(sid)
@@ -230,7 +160,7 @@ class TestGetTree:
         (tmp_path / ".git").mkdir()
         (tmp_path / ".git" / "config").write_text("")
         (tmp_path / "code.py").write_text("pass")
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.get_tree(sid)
@@ -242,7 +172,7 @@ class TestGetTree:
     async def test_depth_limit(self, manager, tmp_path):
         (tmp_path / "a" / "b" / "c").mkdir(parents=True)
         (tmp_path / "a" / "b" / "c" / "deep.py").write_text("pass")
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.get_tree(sid, depth=1)
@@ -250,8 +180,8 @@ class TestGetTree:
         assert a_entry["children"] == []  # depth=1 means no children
 
     @pytest.mark.asyncio
-    async def test_outside_repo(self, manager):
-        start = await manager.start_review()
+    async def test_outside_repo(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         with pytest.raises(PermissionError):
             manager.get_tree(sid, path="../../..")
@@ -259,8 +189,8 @@ class TestGetTree:
 
 class TestRecordActivity:
     @pytest.mark.asyncio
-    async def test_records_activity(self, manager):
-        start = await manager.start_review()
+    async def test_records_activity(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         recorded = manager.record_activity(sid, "alpha", "view_file", "main.py:1-10")
@@ -270,8 +200,8 @@ class TestRecordActivity:
         assert session.agent_activities[0].model_id == "alpha"
 
     @pytest.mark.asyncio
-    async def test_dedup_suppresses_same_activity(self, manager):
-        start = await manager.start_review()
+    async def test_dedup_suppresses_same_activity(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.record_activity(sid, "alpha", "view_file", "main.py:1-10")
@@ -281,8 +211,8 @@ class TestRecordActivity:
         assert len(session.agent_activities) == 1
 
     @pytest.mark.asyncio
-    async def test_different_target_not_suppressed(self, manager):
-        start = await manager.start_review()
+    async def test_different_target_not_suppressed(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.record_activity(sid, "alpha", "view_file", "main.py:1-10")
@@ -292,8 +222,8 @@ class TestRecordActivity:
         assert len(session.agent_activities) == 2
 
     @pytest.mark.asyncio
-    async def test_resolve_model_id_from_key(self, manager):
-        start = await manager.start_review()
+    async def test_resolve_model_id_from_key(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         key = manager.ensure_agent_access_key(sid, "opus")
 
@@ -305,7 +235,7 @@ class TestSearchCode:
     @pytest.mark.asyncio
     async def test_search_finds_match(self, manager, tmp_path):
         (tmp_path / "hello.py").write_text("def greet():\n    print('hello')\n")
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = await manager.search_code(sid, "greet")
@@ -316,7 +246,7 @@ class TestSearchCode:
     @pytest.mark.asyncio
     async def test_search_no_match(self, manager, tmp_path):
         (tmp_path / "hello.py").write_text("pass\n")
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = await manager.search_code(sid, "nonexistent_symbol")
@@ -326,7 +256,7 @@ class TestSearchCode:
     async def test_search_glob_filter(self, manager, tmp_path):
         (tmp_path / "hello.py").write_text("target\n")
         (tmp_path / "hello.js").write_text("target\n")
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = await manager.search_code(sid, "target", glob="*.py")
@@ -337,7 +267,7 @@ class TestSearchCode:
     @pytest.mark.asyncio
     async def test_search_max_results(self, manager, tmp_path):
         (tmp_path / "many.py").write_text("\n".join(f"match_{i}" for i in range(50)))
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = await manager.search_code(sid, "match_", max_results=5)
@@ -347,7 +277,7 @@ class TestSearchCode:
     async def test_search_python_fallback(self, manager, tmp_path, monkeypatch):
         (tmp_path / "code.py").write_text("def my_func():\n    pass\n")
         monkeypatch.setattr("shutil.which", lambda cmd: None)
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = await manager.search_code(sid, "my_func")
@@ -356,8 +286,8 @@ class TestSearchCode:
 
 class TestGetReviewContext:
     @pytest.mark.asyncio
-    async def test_returns_context(self, manager):
-        start = await manager.start_review()
+    async def test_returns_context(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         ctx = manager.get_review_context(sid)
@@ -366,8 +296,8 @@ class TestGetReviewContext:
         assert "files" in ctx
 
     @pytest.mark.asyncio
-    async def test_returns_context_index(self, manager):
-        start = await manager.start_review()
+    async def test_returns_context_index(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         session = manager.get_session(sid)
         session.diff = [
@@ -396,8 +326,8 @@ class TestGetReviewContext:
 
 class TestCreateIssues:
     @pytest.mark.asyncio
-    async def test_creates_issues_from_reviews(self, manager):
-        start = await manager.start_review()
+    async def test_creates_issues_from_reviews(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -424,8 +354,8 @@ class TestCreateIssues:
         assert issues[0].thread[0].action.value == "raise"
 
     @pytest.mark.asyncio
-    async def test_issues_retrievable(self, manager):
-        start = await manager.start_review()
+    async def test_issues_retrievable(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -439,8 +369,8 @@ class TestCreateIssues:
         assert issues[0]["title"] == "Bug"
 
     @pytest.mark.asyncio
-    async def test_normalizes_line_range_from_review(self, manager):
-        start = await manager.start_review()
+    async def test_normalizes_line_range_from_review(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -464,8 +394,8 @@ class TestCreateIssues:
 
 class TestSubmitOpinion:
     @pytest.mark.asyncio
-    async def test_submit_opinion(self, manager):
-        start = await manager.start_review()
+    async def test_submit_opinion(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -483,16 +413,16 @@ class TestSubmitOpinion:
         assert result["thread_length"] == 2  # RAISE + AGREE
 
     @pytest.mark.asyncio
-    async def test_issue_not_found(self, manager):
-        start = await manager.start_review()
+    async def test_issue_not_found(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         with pytest.raises(KeyError, match="Issue not found"):
             manager.submit_opinion(sid, "nonexistent", "gpt", "agree", "ok")
 
     @pytest.mark.asyncio
-    async def test_extracts_mentions(self, manager):
-        start = await manager.start_review()
+    async def test_extracts_mentions(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         session = manager.get_session(sid)
         session.config.models = [
@@ -512,8 +442,8 @@ class TestSubmitOpinion:
         assert issue.thread[-1].mentions == ["codex"]
 
     @pytest.mark.asyncio
-    async def test_human_can_reopen_after_complete(self, manager):
-        start = await manager.start_review()
+    async def test_human_can_reopen_after_complete(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -535,8 +465,8 @@ class TestSubmitOpinion:
         assert issue.turn == 1
 
     @pytest.mark.asyncio
-    async def test_non_human_opinion_still_blocked_in_complete(self, manager):
-        start = await manager.start_review()
+    async def test_non_human_opinion_still_blocked_in_complete(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -550,8 +480,8 @@ class TestSubmitOpinion:
             manager.submit_opinion(sid, issues[0].id, "codex1", "agree", "ok")
 
     @pytest.mark.asyncio
-    async def test_human_assist_can_reopen_after_complete(self, manager):
-        start = await manager.start_review()
+    async def test_human_assist_can_reopen_after_complete(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -573,10 +503,77 @@ class TestSubmitOpinion:
         assert issue.turn == 1
 
 
+class TestFalsePositiveWithdraw:
+    @pytest.mark.asyncio
+    async def test_false_positive_rejected_from_raiser(self, manager, tmp_path):
+        """Original raiser cannot submit false_positive on own issue."""
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue_id = issues[0].id
+
+        with pytest.raises(ValueError, match="Original raiser cannot submit false_positive"):
+            manager.submit_opinion(sid, issue_id, "opus", "false_positive", "Not real")
+
+    @pytest.mark.asyncio
+    async def test_false_positive_accepted_from_non_raiser(self, manager, tmp_path):
+        """Non-raiser can submit false_positive."""
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue_id = issues[0].id
+
+        result = manager.submit_opinion(sid, issue_id, "gpt", "false_positive", "Not a real issue")
+        assert result["status"] == "accepted"
+        issue = manager.get_session(sid).issues[0]
+        assert issue.thread[-1].action == OpinionAction.FALSE_POSITIVE
+
+    @pytest.mark.asyncio
+    async def test_withdraw_rejected_from_non_raiser(self, manager, tmp_path):
+        """Non-raiser cannot withdraw an issue."""
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue_id = issues[0].id
+
+        with pytest.raises(ValueError, match="Only the original raiser can withdraw"):
+            manager.submit_opinion(sid, issue_id, "gpt", "withdraw", "Withdraw this")
+
+    @pytest.mark.asyncio
+    async def test_withdraw_closes_issue_immediately(self, manager, tmp_path):
+        """WITHDRAW by raiser should immediately close the issue."""
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
+        sid = start["session_id"]
+        manager.submit_review(
+            sid, "opus",
+            [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
+        )
+        issues = manager.create_issues_from_reviews(sid)
+        issue = issues[0]
+
+        result = manager.submit_opinion(sid, issue.id, "opus", "withdraw", "I agree, false alarm")
+        assert result["status"] == "accepted"
+        assert issue.consensus is True
+        assert issue.consensus_type == "closed"
+        assert issue.final_severity == Severity.DISMISSED
+
+
 class TestGetPendingIssues:
     @pytest.mark.asyncio
-    async def test_pending(self, manager):
-        start = await manager.start_review()
+    async def test_pending(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -590,8 +587,8 @@ class TestGetPendingIssues:
         assert len(pending) == 1
 
     @pytest.mark.asyncio
-    async def test_no_pending_after_opinion(self, manager):
-        start = await manager.start_review()
+    async def test_no_pending_after_opinion(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -607,8 +604,8 @@ class TestGetPendingIssues:
         assert len(pending) == 0
 
     @pytest.mark.asyncio
-    async def test_human_comment_reopens_pending_for_all_agents(self, manager):
-        start = await manager.start_review()
+    async def test_human_comment_reopens_pending_for_all_agents(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -630,8 +627,8 @@ class TestGetPendingIssues:
 
 class TestSessionStatus:
     @pytest.mark.asyncio
-    async def test_status(self, manager):
-        start = await manager.start_review()
+    async def test_status(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         status = manager.get_session_status(sid)
@@ -641,8 +638,8 @@ class TestSessionStatus:
 
 class TestFinalReport:
     @pytest.mark.asyncio
-    async def test_report(self, manager):
-        start = await manager.start_review()
+    async def test_report(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -662,8 +659,8 @@ class TestFinalReport:
 
 class TestGetFinalReportEnhanced:
     @pytest.mark.asyncio
-    async def test_report_includes_lifecycle_fields(self, manager):
-        start = await manager.start_review()
+    async def test_report_includes_lifecycle_fields(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -679,12 +676,11 @@ class TestGetFinalReportEnhanced:
         assert "issue_responses" in report
         assert "fix_commits" in report
         assert "verification_round" in report
-        assert "overall_reviews" in report
         assert "implementation_context" in report
 
     @pytest.mark.asyncio
-    async def test_issue_has_new_fields(self, manager):
-        start = await manager.start_review()
+    async def test_issue_has_new_fields(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -706,8 +702,8 @@ class TestGetFinalReportEnhanced:
         assert "fix it" in issue["suggestion"]
 
     @pytest.mark.asyncio
-    async def test_stats_separates_fix_required_and_dismissed(self, manager):
-        start = await manager.start_review()
+    async def test_stats_separates_fix_required_and_dismissed(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -730,8 +726,8 @@ class TestGetFinalReportEnhanced:
         assert report["stats"]["consensus_reached"] == 2
 
     @pytest.mark.asyncio
-    async def test_report_includes_issue_responses(self, manager):
-        start = await manager.start_review()
+    async def test_report_includes_issue_responses(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -749,8 +745,8 @@ class TestGetFinalReportEnhanced:
         assert report["issue_responses"][0]["action"] == "accept"
 
     @pytest.mark.asyncio
-    async def test_report_includes_fix_commits(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_report_includes_fix_commits(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
@@ -762,25 +758,8 @@ class TestGetFinalReportEnhanced:
         assert report["verification_round"] == 1
 
     @pytest.mark.asyncio
-    async def test_report_includes_overall_reviews(self, manager):
-        start = await manager.start_review()
-        sid = start["session_id"]
-
-        manager.submit_overall_review(
-            session_id=sid,
-            model_id="opus",
-            merge_decision="mergeable",
-            summary="All good",
-            task_type="review",
-        )
-
-        report = manager.get_final_report(sid)
-        assert len(report["overall_reviews"]) == 1
-        assert report["overall_reviews"][0]["merge_decision"] == "mergeable"
-
-    @pytest.mark.asyncio
-    async def test_report_includes_implementation_context(self, manager):
-        start = await manager.start_review()
+    async def test_report_includes_implementation_context(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_implementation_context(sid, {
@@ -793,15 +772,14 @@ class TestGetFinalReportEnhanced:
         assert report["implementation_context"]["summary"] == "Add caching"
 
     @pytest.mark.asyncio
-    async def test_report_empty_session(self, manager):
-        start = await manager.start_review()
+    async def test_report_empty_session(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         report = manager.get_final_report(sid)
         assert report["issues"] == []
         assert report["issue_responses"] == []
         assert report["fix_commits"] == []
-        assert report["overall_reviews"] == []
         assert report["implementation_context"] is None
         assert report["stats"]["fix_required"] == 0
         assert report["stats"]["dismissed"] == 0
@@ -809,8 +787,8 @@ class TestGetFinalReportEnhanced:
 
 class TestGeneratePrMarkdown:
     @pytest.mark.asyncio
-    async def test_includes_issue_table(self, manager):
-        start = await manager.start_review()
+    async def test_includes_issue_table(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -835,8 +813,8 @@ class TestGeneratePrMarkdown:
         assert "db.py" in md
 
     @pytest.mark.asyncio
-    async def test_includes_fix_commits(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_includes_fix_commits(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
@@ -852,8 +830,8 @@ class TestGeneratePrMarkdown:
         assert "coding-agent" in md
 
     @pytest.mark.asyncio
-    async def test_includes_verification(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_includes_verification(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
@@ -869,8 +847,8 @@ class TestGeneratePrMarkdown:
         assert "All issues resolved" in md
 
     @pytest.mark.asyncio
-    async def test_minimal_session(self, manager):
-        start = await manager.start_review()
+    async def test_minimal_session(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         md = manager.generate_pr_markdown(sid)
@@ -880,8 +858,8 @@ class TestGeneratePrMarkdown:
 
 class TestAddManualIssue:
     @pytest.mark.asyncio
-    async def test_adds_issue(self, manager):
-        start = await manager.start_review()
+    async def test_adds_issue(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.add_manual_issue(
@@ -897,8 +875,8 @@ class TestAddManualIssue:
         assert session.issues[0].raised_by == "human"
 
     @pytest.mark.asyncio
-    async def test_cannot_add_in_idle_state(self, manager):
-        start = await manager.start_review()
+    async def test_cannot_add_in_idle_state(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         session = manager.get_session(sid)
         session.status = SessionStatus.IDLE
@@ -907,8 +885,8 @@ class TestAddManualIssue:
             manager.add_manual_issue(sid, "Bug", "high", "a.py", None, "desc")
 
     @pytest.mark.asyncio
-    async def test_issue_has_raise_opinion(self, manager):
-        start = await manager.start_review()
+    async def test_issue_has_raise_opinion(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.add_manual_issue(
@@ -921,8 +899,8 @@ class TestAddManualIssue:
 
 class TestUpdateAgent:
     @pytest.mark.asyncio
-    async def test_updates_fields(self, manager):
-        start = await manager.start_review()
+    async def test_updates_fields(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.add_agent(sid, {"id": "opus", "role": "general"})
 
@@ -938,8 +916,8 @@ class TestUpdateAgent:
         assert result["enabled"] is False
 
     @pytest.mark.asyncio
-    async def test_id_immutable(self, manager):
-        start = await manager.start_review()
+    async def test_id_immutable(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.add_agent(sid, {"id": "opus"})
 
@@ -947,8 +925,8 @@ class TestUpdateAgent:
         assert result["id"] == "opus"
 
     @pytest.mark.asyncio
-    async def test_nonexistent_raises(self, manager):
-        start = await manager.start_review()
+    async def test_nonexistent_raises(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         with pytest.raises(KeyError, match="Agent not found"):
@@ -961,9 +939,9 @@ class TestListSessions:
         assert manager.list_sessions() == []
 
     @pytest.mark.asyncio
-    async def test_returns_all_sessions(self, manager):
-        await manager.start_review("main")
-        await manager.start_review("develop")
+    async def test_returns_all_sessions(self, manager, tmp_path):
+        await manager.start_review("main", repo_path=str(tmp_path), head="test-branch")
+        await manager.start_review("develop", repo_path=str(tmp_path), head="test-branch")
 
         sessions = manager.list_sessions()
         assert len(sessions) == 2
@@ -971,8 +949,8 @@ class TestListSessions:
         assert sessions[0]["base"] in ("main", "develop")
 
     @pytest.mark.asyncio
-    async def test_summary_fields(self, manager):
-        await manager.start_review("main")
+    async def test_summary_fields(self, manager, tmp_path):
+        await manager.start_review("main", repo_path=str(tmp_path), head="test-branch")
         sessions = manager.list_sessions()
         s = sessions[0]
         assert "session_id" in s
@@ -987,8 +965,8 @@ class TestListSessions:
 
 class TestDeleteSession:
     @pytest.mark.asyncio
-    async def test_deletes_session(self, manager):
-        result = await manager.start_review("main")
+    async def test_deletes_session(self, manager, tmp_path):
+        result = await manager.start_review("main", repo_path=str(tmp_path), head="test-branch")
         sid = result["session_id"]
 
         manager.delete_session(sid)
@@ -996,8 +974,8 @@ class TestDeleteSession:
         assert manager.list_sessions() == []
 
     @pytest.mark.asyncio
-    async def test_clears_current_if_deleted(self, manager):
-        result = await manager.start_review("main")
+    async def test_clears_current_if_deleted(self, manager, tmp_path):
+        result = await manager.start_review("main", repo_path=str(tmp_path), head="test-branch")
         sid = result["session_id"]
         assert manager.current_session is not None
 
@@ -1010,9 +988,9 @@ class TestDeleteSession:
             manager.delete_session("nonexistent")
 
     @pytest.mark.asyncio
-    async def test_delete_preserves_other_sessions(self, manager):
-        r1 = await manager.start_review("main")
-        r2 = await manager.start_review("develop")
+    async def test_delete_preserves_other_sessions(self, manager, tmp_path):
+        r1 = await manager.start_review("main", repo_path=str(tmp_path), head="test-branch")
+        r2 = await manager.start_review("develop", repo_path=str(tmp_path), head="test-branch")
 
         manager.delete_session(r1["session_id"])
         assert len(manager.sessions) == 1
@@ -1021,9 +999,9 @@ class TestDeleteSession:
 
 class TestSetCurrentSession:
     @pytest.mark.asyncio
-    async def test_switches_session(self, manager):
-        r1 = await manager.start_review("main")
-        r2 = await manager.start_review("develop")
+    async def test_switches_session(self, manager, tmp_path):
+        r1 = await manager.start_review("main", repo_path=str(tmp_path), head="test-branch")
+        r2 = await manager.start_review("develop", repo_path=str(tmp_path), head="test-branch")
 
         # After second start, current is r2
         assert manager.current_session.id == r2["session_id"]
@@ -1065,7 +1043,7 @@ class TestAgentPresets:
         assert removed["status"] == "removed"
 
     @pytest.mark.asyncio
-    async def test_start_review_uses_selected_presets(self, manager):
+    async def test_start_review_uses_selected_presets(self, manager, tmp_path):
         manager.add_agent_preset({
             "id": "codex-p1",
             "client_type": "codex",
@@ -1077,25 +1055,25 @@ class TestAgentPresets:
             "role": "performance",
         })
 
-        started = await manager.start_review("main", preset_ids=["gemini-p1", "codex-p1"])
+        started = await manager.start_review("main", repo_path=str(tmp_path), head="test-branch", preset_ids=["gemini-p1", "codex-p1"])
         session = manager.get_session(started["session_id"])
         assert [m.id for m in session.config.models] == ["gemini-p1", "codex-p1"]
 
     @pytest.mark.asyncio
-    async def test_start_review_unknown_preset_raises(self, manager):
+    async def test_start_review_unknown_preset_raises(self, manager, tmp_path):
         with pytest.raises(ValueError, match="Unknown preset ids"):
-            await manager.start_review("main", preset_ids=["missing"])
+            await manager.start_review("main", repo_path=str(tmp_path), head="test-branch", preset_ids=["missing"])
 
     @pytest.mark.asyncio
-    async def test_start_review_empty_preset_ids_raises(self, manager):
+    async def test_start_review_empty_preset_ids_raises(self, manager, tmp_path):
         with pytest.raises(ValueError, match="at least one preset"):
-            await manager.start_review("main", preset_ids=[])
+            await manager.start_review("main", repo_path=str(tmp_path), head="test-branch", preset_ids=[])
 
 
 class TestSubmitImplementationContext:
     @pytest.mark.asyncio
-    async def test_submit_in_reviewing(self, manager):
-        start = await manager.start_review()
+    async def test_submit_in_reviewing(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.submit_implementation_context(sid, {
@@ -1109,8 +1087,8 @@ class TestSubmitImplementationContext:
         assert result["submitted_at"] is not None
 
     @pytest.mark.asyncio
-    async def test_submit_in_collecting(self, manager):
-        start = await manager.start_review()
+    async def test_submit_in_collecting(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         session = manager.get_session(sid)
         session.status = SessionStatus.COLLECTING
@@ -1119,8 +1097,8 @@ class TestSubmitImplementationContext:
         assert result["summary"] == "WIP"
 
     @pytest.mark.asyncio
-    async def test_submit_rejects_in_complete(self, manager):
-        start = await manager.start_review()
+    async def test_submit_rejects_in_complete(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         session = manager.get_session(sid)
         session.status = SessionStatus.COMPLETE
@@ -1129,8 +1107,8 @@ class TestSubmitImplementationContext:
             manager.submit_implementation_context(sid, {"summary": "too late"})
 
     @pytest.mark.asyncio
-    async def test_context_included_in_review_context(self, manager):
-        start = await manager.start_review()
+    async def test_context_included_in_review_context(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_implementation_context(sid, {
@@ -1144,8 +1122,8 @@ class TestSubmitImplementationContext:
         assert ctx["implementation_context"]["tradeoffs"] == ["Breaks backward compat"]
 
     @pytest.mark.asyncio
-    async def test_no_context_omits_key(self, manager):
-        start = await manager.start_review()
+    async def test_no_context_omits_key(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         ctx = manager.get_review_context(sid)
@@ -1154,8 +1132,8 @@ class TestSubmitImplementationContext:
 
 class TestAgentElapsed:
     @pytest.mark.asyncio
-    async def test_elapsed_freezes_while_waiting_and_ticks_while_reviewing(self, manager):
-        started = await manager.start_review("main")
+    async def test_elapsed_freezes_while_waiting_and_ticks_while_reviewing(self, manager, tmp_path):
+        started = await manager.start_review("main", repo_path=str(tmp_path), head="test-branch")
         sid = started["session_id"]
         session = manager.get_session(sid)
 
@@ -1178,13 +1156,13 @@ class TestAgentElapsed:
         assert ticking > frozen_2
 
 
-def _setup_confirmed_session(manager):
+def _setup_confirmed_session(manager, tmp_path):
     """Helper: create a session with confirmed issues."""
     import asyncio
     from ai_review.consensus import apply_consensus
 
     loop = asyncio.get_event_loop()
-    start = loop.run_until_complete(manager.start_review())
+    start = loop.run_until_complete(manager.start_review(repo_path=str(tmp_path), head="test-branch"))
     sid = start["session_id"]
     manager.submit_review(
         sid, "opus",
@@ -1219,8 +1197,8 @@ def _setup_confirmed_session(manager):
 
 class TestGetConfirmedIssues:
     @pytest.mark.asyncio
-    async def test_returns_only_fix_required(self, manager):
-        start = await manager.start_review()
+    async def test_returns_only_fix_required(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1237,8 +1215,8 @@ class TestGetConfirmedIssues:
         assert "consensus_summary" in result["issues"][0]
 
     @pytest.mark.asyncio
-    async def test_empty_when_no_fix_required(self, manager):
-        start = await manager.start_review()
+    async def test_empty_when_no_fix_required(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1253,8 +1231,8 @@ class TestGetConfirmedIssues:
         assert result["total_dismissed"] == 1
 
     @pytest.mark.asyncio
-    async def test_consensus_summary_in_result(self, manager):
-        start = await manager.start_review()
+    async def test_consensus_summary_in_result(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1269,8 +1247,8 @@ class TestGetConfirmedIssues:
 
 class TestSubmitIssueResponse:
     @pytest.mark.asyncio
-    async def test_accept(self, manager):
-        start = await manager.start_review()
+    async def test_accept(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1288,8 +1266,8 @@ class TestSubmitIssueResponse:
         assert len(session.issue_responses) == 1
 
     @pytest.mark.asyncio
-    async def test_dispute_adds_no_fix_opinion(self, manager):
-        start = await manager.start_review()
+    async def test_dispute_adds_no_fix_opinion(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1316,8 +1294,8 @@ class TestSubmitIssueResponse:
         assert "[DISPUTE]" in last_opinion.reasoning
 
     @pytest.mark.asyncio
-    async def test_partial(self, manager):
-        start = await manager.start_review()
+    async def test_partial(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1336,8 +1314,8 @@ class TestSubmitIssueResponse:
         assert result["action"] == "partial"
 
     @pytest.mark.asyncio
-    async def test_duplicate_rejected(self, manager):
-        start = await manager.start_review()
+    async def test_duplicate_rejected(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1354,8 +1332,8 @@ class TestSubmitIssueResponse:
             manager.submit_issue_response(sid, issue.id, "accept", "again")
 
     @pytest.mark.asyncio
-    async def test_nonexistent_issue_raises(self, manager):
-        start = await manager.start_review()
+    async def test_nonexistent_issue_raises(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         session = manager.get_session(sid)
         session.status = SessionStatus.AGENT_RESPONSE
@@ -1364,8 +1342,8 @@ class TestSubmitIssueResponse:
             manager.submit_issue_response(sid, "nonexistent", "accept")
 
     @pytest.mark.asyncio
-    async def test_wrong_state_raises(self, manager):
-        start = await manager.start_review()
+    async def test_wrong_state_raises(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         session = manager.get_session(sid)
         session.status = SessionStatus.COMPLETE
@@ -1374,8 +1352,8 @@ class TestSubmitIssueResponse:
             manager.submit_issue_response(sid, "any", "accept")
 
     @pytest.mark.asyncio
-    async def test_callback_called(self, manager):
-        start = await manager.start_review()
+    async def test_callback_called(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1397,8 +1375,8 @@ class TestSubmitIssueResponse:
 
 class TestGetIssueResponseStatus:
     @pytest.mark.asyncio
-    async def test_tracking(self, manager):
-        start = await manager.start_review()
+    async def test_tracking(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1431,11 +1409,11 @@ class TestGetIssueResponseStatus:
         assert len(status["pending_ids"]) == 0
 
 
-async def _setup_fixing_session(manager):
+async def _setup_fixing_session(manager, tmp_path):
     """Helper: create a session in FIXING state with confirmed issues."""
     from ai_review.consensus import apply_consensus
 
-    start = await manager.start_review()
+    start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
     sid = start["session_id"]
     manager.submit_review(
         sid, "opus",
@@ -1465,8 +1443,8 @@ async def _setup_fixing_session(manager):
 
 class TestSubmitFixComplete:
     @pytest.mark.asyncio
-    async def test_success(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_success(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         mock_delta = [DiffFile(path="db.py", additions=5, deletions=2, content="+fix")]
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
@@ -1477,16 +1455,16 @@ class TestSubmitFixComplete:
         assert result["delta_files_changed"] == 1
 
     @pytest.mark.asyncio
-    async def test_wrong_state_raises(self, manager):
-        start = await manager.start_review()
+    async def test_wrong_state_raises(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         with pytest.raises(ValueError, match="Cannot submit fix-complete"):
             await manager.submit_fix_complete(sid, "abc")
 
     @pytest.mark.asyncio
-    async def test_commit_recorded(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_commit_recorded(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
             await manager.submit_fix_complete(sid, "def456", submitted_by="coding-agent")
@@ -1496,8 +1474,8 @@ class TestSubmitFixComplete:
         assert session.fix_commits[0].submitted_by == "coding-agent"
 
     @pytest.mark.asyncio
-    async def test_delta_diff_collected(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_delta_diff_collected(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+patched")]
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
@@ -1507,8 +1485,8 @@ class TestSubmitFixComplete:
         assert session.delta_diff[0].path == "db.py"
 
     @pytest.mark.asyncio
-    async def test_verification_round_incremented(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_verification_round_incremented(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         assert session.verification_round == 0
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
@@ -1517,8 +1495,8 @@ class TestSubmitFixComplete:
         assert session.verification_round == 1
 
     @pytest.mark.asyncio
-    async def test_head_updated(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_head_updated(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         assert session.head == "abc123"
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
@@ -1527,8 +1505,8 @@ class TestSubmitFixComplete:
         assert session.head == "def456"
 
     @pytest.mark.asyncio
-    async def test_transitions_to_verifying(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_transitions_to_verifying(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
             await manager.submit_fix_complete(sid, "def456")
@@ -1536,8 +1514,8 @@ class TestSubmitFixComplete:
         assert session.status == SessionStatus.VERIFYING
 
     @pytest.mark.asyncio
-    async def test_callback_called(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_callback_called(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         callback_args = []
         manager.on_fix_completed = lambda s: callback_args.append(s)
 
@@ -1547,8 +1525,8 @@ class TestSubmitFixComplete:
         assert callback_args == [sid]
 
     @pytest.mark.asyncio
-    async def test_auto_fills_issues_addressed(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_auto_fills_issues_addressed(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         confirmed_ids = sorted(
             i.id for i in session.issues if i.consensus_type == "fix_required"
         )
@@ -1559,8 +1537,8 @@ class TestSubmitFixComplete:
         assert result["issues_addressed"] == confirmed_ids
 
     @pytest.mark.asyncio
-    async def test_nonexistent_issue_raises(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_nonexistent_issue_raises(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
 
         with pytest.raises(KeyError, match="not found or not fix_required"):
             with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=[]):
@@ -1569,8 +1547,8 @@ class TestSubmitFixComplete:
 
 class TestGetDeltaContext:
     @pytest.mark.asyncio
-    async def test_full_fields(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_full_fields(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         session.delta_diff = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=session.delta_diff):
@@ -1587,8 +1565,8 @@ class TestGetDeltaContext:
         assert ctx["verification_round"] == 1
 
     @pytest.mark.asyncio
-    async def test_original_issues_only_fix_required(self, manager):
-        start = await manager.start_review()
+    async def test_original_issues_only_fix_required(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
         manager.submit_review(
             sid, "opus",
@@ -1608,8 +1586,8 @@ class TestGetDeltaContext:
 
 class TestGetActionableIssues:
     @pytest.mark.asyncio
-    async def test_returns_only_fix_required(self, manager):
-        start = await manager.start_review()
+    async def test_returns_only_fix_required(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -1630,8 +1608,8 @@ class TestGetActionableIssues:
         assert result["issues"][0]["title"] == "Bug A"
 
     @pytest.mark.asyncio
-    async def test_addressed_classification(self, manager):
-        sid, session = await _setup_fixing_session(manager)
+    async def test_addressed_classification(self, manager, tmp_path):
+        sid, session = await _setup_fixing_session(manager, tmp_path)
         mock_delta = [DiffFile(path="db.py", additions=3, deletions=1, content="+fix")]
 
         with patch("ai_review.session_manager.collect_delta_diff", new_callable=AsyncMock, return_value=mock_delta):
@@ -1647,8 +1625,8 @@ class TestGetActionableIssues:
         assert result["unaddressed"] == len(unaddressed)
 
     @pytest.mark.asyncio
-    async def test_by_file_grouping(self, manager):
-        start = await manager.start_review()
+    async def test_by_file_grouping(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -1671,8 +1649,8 @@ class TestGetActionableIssues:
         assert len(result["by_file"]["pool.py"]) == 1
 
     @pytest.mark.asyncio
-    async def test_empty_session(self, manager):
-        start = await manager.start_review()
+    async def test_empty_session(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.get_actionable_issues(sid)
@@ -1684,9 +1662,9 @@ class TestGetActionableIssues:
 
 class TestBackwardCompatibility:
     @pytest.mark.asyncio
-    async def test_report_without_new_fields(self, manager):
+    async def test_report_without_new_fields(self, manager, tmp_path):
         """Session with no new M1~M4 data should still produce a valid report."""
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         manager.submit_review(
@@ -1708,14 +1686,13 @@ class TestBackwardCompatibility:
         assert report["issue_responses"] == []
         assert report["fix_commits"] == []
         assert report["verification_round"] == 0
-        assert report["overall_reviews"] == []
         assert report["implementation_context"] is None
         assert report["stats"]["fix_required"] == 0
 
     @pytest.mark.asyncio
-    async def test_actionable_issues_empty_session(self, manager):
+    async def test_actionable_issues_empty_session(self, manager, tmp_path):
         """Session with no issues should return empty actionable issues."""
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         result = manager.get_actionable_issues(sid)
@@ -1725,9 +1702,9 @@ class TestBackwardCompatibility:
         assert result["by_file"] == {}
 
     @pytest.mark.asyncio
-    async def test_pr_markdown_minimal_session(self, manager):
+    async def test_pr_markdown_minimal_session(self, manager, tmp_path):
         """Minimal session should produce valid markdown."""
-        start = await manager.start_review()
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
         sid = start["session_id"]
 
         md = manager.generate_pr_markdown(sid)
@@ -1737,3 +1714,194 @@ class TestBackwardCompatibility:
         # No fix commits or verification sections
         assert "### Fix Commits" not in md
         assert "### Verification" not in md
+
+
+class TestStartReviewWithContext:
+    """C1: start_review() with inline implementation_context."""
+
+    @pytest.mark.asyncio
+    async def test_inline_context_applied(self, manager, tmp_path):
+        result = await manager.start_review(
+            repo_path=str(tmp_path), head="test-branch",
+            implementation_context={"summary": "test", "decisions": ["d1"]},
+        )
+        session = manager.get_session(result["session_id"])
+        assert session.implementation_context is not None
+        assert session.implementation_context.summary == "test"
+        assert session.implementation_context.decisions == ["d1"]
+
+    @pytest.mark.asyncio
+    async def test_no_context_keeps_none(self, manager, tmp_path):
+        result = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
+        session = manager.get_session(result["session_id"])
+        assert session.implementation_context is None
+
+
+class TestDismissIssue:
+    """C4: dismiss_issue() in FIXING state."""
+
+    def _setup_fixing_session(self, manager):
+        """Create a session in FIXING state with a fix_required issue."""
+        from ai_review.models import Issue, ReviewSession, Severity
+        from ai_review.state import transition
+
+        session = ReviewSession(base="main", status=SessionStatus.IDLE)
+        manager.sessions[session.id] = session
+        transition(session, SessionStatus.COLLECTING)
+        transition(session, SessionStatus.REVIEWING)
+        transition(session, SessionStatus.DEDUP)
+        transition(session, SessionStatus.DELIBERATING)
+        transition(session, SessionStatus.FIXING)
+
+        issue = Issue(
+            title="Bug", severity=Severity.HIGH, file="x.py",
+            description="d", raised_by="opus",
+            consensus=True, consensus_type="fix_required",
+        )
+        session.issues.append(issue)
+        manager.persist()
+        return session, issue
+
+    def test_dismiss_success(self, manager):
+        session, issue = self._setup_fixing_session(manager)
+        result = manager.dismiss_issue(session.id, issue.id, "Not critical", "tony")
+        assert result["status"] == "dismissed"
+        assert len(session.dismissals) == 1
+        assert session.dismissals[0].issue_id == issue.id
+
+    def test_dismiss_wrong_state(self, manager):
+        from ai_review.models import Issue, ReviewSession, Severity
+        from ai_review.state import transition
+
+        session = ReviewSession(base="main", status=SessionStatus.IDLE)
+        manager.sessions[session.id] = session
+        transition(session, SessionStatus.COLLECTING)
+        transition(session, SessionStatus.REVIEWING)
+        issue = Issue(
+            title="Bug", severity=Severity.HIGH, file="x.py",
+            description="d", consensus=True, consensus_type="fix_required",
+        )
+        session.issues.append(issue)
+        with pytest.raises(ValueError, match="Cannot dismiss"):
+            manager.dismiss_issue(session.id, issue.id)
+
+    def test_dismiss_non_fix_required(self, manager):
+        from ai_review.models import Issue, Severity
+
+        session, _ = self._setup_fixing_session(manager)
+        nit = Issue(
+            title="Nit", severity=Severity.LOW, file="y.py",
+            description="d", consensus=True, consensus_type="dismissed",
+        )
+        session.issues.append(nit)
+        with pytest.raises(ValueError, match="Can only dismiss fix_required"):
+            manager.dismiss_issue(session.id, nit.id)
+
+    def test_dismiss_duplicate(self, manager):
+        session, issue = self._setup_fixing_session(manager)
+        manager.dismiss_issue(session.id, issue.id)
+        with pytest.raises(ValueError, match="Already dismissed"):
+            manager.dismiss_issue(session.id, issue.id)
+
+    def test_dismiss_not_found(self, manager):
+        session, _ = self._setup_fixing_session(manager)
+        with pytest.raises(KeyError, match="Issue not found"):
+            manager.dismiss_issue(session.id, "nonexistent")
+
+    def test_actionable_includes_dismissed_flag(self, manager):
+        session, issue = self._setup_fixing_session(manager)
+        manager.dismiss_issue(session.id, issue.id, "Not needed")
+        result = manager.get_actionable_issues(session.id)
+        assert result["issues"][0]["dismissed"] is True
+
+    def test_report_includes_dismissals(self, manager):
+        session, issue = self._setup_fixing_session(manager)
+        manager.dismiss_issue(session.id, issue.id, "Not needed", "tony")
+        report = manager.get_final_report(session.id)
+        assert len(report["dismissals"]) == 1
+        assert report["dismissals"][0]["issue_id"] == issue.id
+
+
+class TestPersistDebounce:
+    """Tests for debounced persist() and explicit flush()."""
+
+    def test_sync_fallback_writes_immediately(self, tmp_path, monkeypatch):
+        """persist() with no running event loop writes synchronously."""
+        monkeypatch.chdir(tmp_path)
+        mgr = SessionManager()
+        # Default presets are persisted during __init__
+        assert mgr._state_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_debounce_coalesces_writes(self, tmp_path, monkeypatch):
+        """Multiple persist() calls within debounce window produce one write."""
+        monkeypatch.chdir(tmp_path)
+        mgr = SessionManager()
+        write_count = 0
+        original_write = mgr._write_snapshot
+
+        def counting_write(payload):
+            nonlocal write_count
+            write_count += 1
+            original_write(payload)
+
+        mgr._write_snapshot = counting_write
+        write_count = 0  # reset after init writes
+
+        # Fire 5 rapid persists
+        for _ in range(5):
+            mgr.persist()
+
+        # No write yet (debounce pending)
+        assert mgr._dirty is True
+
+        # Wait for debounce to fire + to_thread to complete
+        await asyncio.sleep(0.3)
+
+        assert write_count == 1
+        assert mgr._dirty is False
+
+    @pytest.mark.asyncio
+    async def test_flush_writes_immediately(self, tmp_path, monkeypatch):
+        """flush() bypasses debounce and writes immediately."""
+        monkeypatch.chdir(tmp_path)
+        mgr = SessionManager()
+        write_count = 0
+        original_write = mgr._write_snapshot
+
+        def counting_write(payload):
+            nonlocal write_count
+            write_count += 1
+            original_write(payload)
+
+        mgr._write_snapshot = counting_write
+        write_count = 0
+
+        mgr.persist()
+        assert mgr._dirty is True
+
+        await mgr.flush()
+        assert mgr._dirty is False
+        assert write_count == 1
+
+    @pytest.mark.asyncio
+    async def test_flush_noop_when_clean(self, tmp_path, monkeypatch):
+        """flush() does nothing when not dirty."""
+        monkeypatch.chdir(tmp_path)
+        mgr = SessionManager()
+
+        # Clear any pending dirty state from __init__
+        await mgr.flush()
+
+        write_count = 0
+        original_write = mgr._write_snapshot
+
+        def counting_write(payload):
+            nonlocal write_count
+            write_count += 1
+            original_write(payload)
+
+        mgr._write_snapshot = counting_write
+
+        await mgr.flush()
+        assert write_count == 0

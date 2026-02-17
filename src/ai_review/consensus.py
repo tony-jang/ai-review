@@ -10,6 +10,13 @@ from collections import Counter
 
 from ai_review.models import Issue, OpinionAction, Severity
 
+# Actions that count toward the "no fix" direction in voting
+_NO_FIX_ACTIONS = frozenset({
+    OpinionAction.NO_FIX,
+    OpinionAction.FALSE_POSITIVE,
+    OpinionAction.WITHDRAW,
+})
+
 # Severity ordering for conservative tie-breaking (higher index = more severe)
 _SEVERITY_ORDER: dict[Severity, int] = {
     Severity.LOW: 0,
@@ -44,7 +51,7 @@ def check_consensus(
         if op.action in (OpinionAction.FIX_REQUIRED, OpinionAction.RAISE):
             weighted_fix += max(0.0, min(op.confidence, 1.0))
             voters.add(op.model_id)
-        elif op.action == OpinionAction.NO_FIX:
+        elif op.action in _NO_FIX_ACTIONS:
             weighted_no_fix += max(0.0, min(op.confidence, 1.0))
             voters.add(op.model_id)
 
@@ -70,7 +77,7 @@ def determine_consensus_type(issue: Issue) -> str:
         if op.action in (OpinionAction.FIX_REQUIRED, OpinionAction.RAISE):
             weighted_fix += max(0.0, min(op.confidence, 1.0))
             voters.add(op.model_id)
-        elif op.action == OpinionAction.NO_FIX:
+        elif op.action in _NO_FIX_ACTIONS:
             weighted_no_fix += max(0.0, min(op.confidence, 1.0))
             voters.add(op.model_id)
 
@@ -100,7 +107,7 @@ def determine_final_severity(issue: Issue) -> Severity:
         voters.add(op.model_id)
         conf = max(0.0, min(op.confidence, 1.0))
 
-        if op.action == OpinionAction.NO_FIX:
+        if op.action in _NO_FIX_ACTIONS:
             weighted_no_fix += conf
         elif op.action in (OpinionAction.RAISE, OpinionAction.FIX_REQUIRED):
             weighted_fix += conf

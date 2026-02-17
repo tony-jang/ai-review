@@ -351,3 +351,54 @@ class TestMajorityFallback:
         ]
         issue = _make_issue_with_thread(opinions)
         assert check_consensus(issue, threshold=2.0, total_voters=0) is False
+
+
+class TestFalsePositiveWithdrawConsensus:
+    """Tests for FALSE_POSITIVE and WITHDRAW actions in consensus."""
+
+    def test_false_positive_counts_as_no_fix(self):
+        """FALSE_POSITIVE should count toward no_fix direction."""
+        opinions = [
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH),
+            _make_opinion("b", OpinionAction.FALSE_POSITIVE),
+            _make_opinion("c", OpinionAction.FALSE_POSITIVE),
+        ]
+        issue = _make_issue_with_thread(opinions)
+        assert check_consensus(issue, threshold=2.0) is True
+        assert determine_consensus_type(issue) == "dismissed"
+
+    def test_withdraw_counts_as_no_fix(self):
+        """WITHDRAW should count toward no_fix direction."""
+        opinions = [
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH),
+            _make_opinion("b", OpinionAction.NO_FIX),
+            _make_opinion("c", OpinionAction.WITHDRAW),
+        ]
+        issue = _make_issue_with_thread(opinions)
+        assert check_consensus(issue, threshold=2.0) is True
+        assert determine_consensus_type(issue) == "dismissed"
+
+    def test_false_positive_in_severity_determination(self):
+        """FALSE_POSITIVE votes should lead to DISMISSED severity."""
+        opinions = [
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH),
+            _make_opinion("b", OpinionAction.FALSE_POSITIVE),
+            _make_opinion("c", OpinionAction.FALSE_POSITIVE),
+        ]
+        issue = _make_issue_with_thread(opinions)
+        assert determine_final_severity(issue) == Severity.DISMISSED
+
+    def test_closed_issue_skipped_by_apply_consensus(self):
+        """Issues with consensus_type='closed' should not be re-evaluated."""
+        issue = _make_issue_with_thread([
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH),
+            _make_opinion("a", OpinionAction.WITHDRAW),
+        ])
+        issue.consensus = True
+        issue.consensus_type = "closed"
+        issue.final_severity = Severity.DISMISSED
+
+        apply_consensus([issue], threshold=2.0)
+        # Should remain closed, not recalculated
+        assert issue.consensus_type == "closed"
+        assert issue.final_severity == Severity.DISMISSED

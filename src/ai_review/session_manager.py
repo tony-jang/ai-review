@@ -24,14 +24,13 @@ from ai_review.models import (
     FixCommit,
     ImplementationContext,
     Issue,
+    IssueDismissal,
     IssueResponse,
     IssueResponseAction,
     Knowledge,
-    MergeDecision,
     ModelConfig,
     Opinion,
     OpinionAction,
-    OverallReview,
     RawIssue,
     Review,
     ReviewSession,
@@ -48,13 +47,19 @@ logger = logging.getLogger(__name__)
 class SessionManager:
     """Manages review sessions and orchestrates state transitions."""
 
-    def __init__(self, repo_path: str | None = None) -> None:
-        self.repo_path = repo_path
+    _DEBOUNCE_SECONDS = 0.1
+
+    def __init__(self) -> None:
         self.sessions: dict[str, ReviewSession] = {}
         self.agent_presets: dict[str, ModelConfig] = {}
         self.broker = SSEBroker()
         self._current_session_id: str | None = None
-        self._state_file = self._resolve_state_file(repo_path)
+        self._state_file = self._resolve_state_file()
+
+        # Debounced persist state
+        self._dirty = False
+        self._flush_handle: asyncio.TimerHandle | None = None
+        self._flush_lock = asyncio.Lock()
 
         # Optional callbacks — set by Orchestrator to drive automation.
         # When None the manager behaves as before (manual mode).
@@ -62,7 +67,9 @@ class SessionManager:
         self.on_opinion_submitted: Callable[[str, str, str], Any] | None = None  # (session_id, issue_id, model_id)
         self.on_issue_responded: Callable[[str, str, str], Any] | None = None  # (session_id, issue_id, action)
         self.on_fix_completed: Callable[[str], Any] | None = None  # (session_id,)
+        self.on_issue_dismissed: Callable[[str, str], Any] | None = None  # (session_id, issue_id)
         self._load_state()
+        self._ensure_default_presets()
 
     @property
     def current_session(self) -> ReviewSession | None:
@@ -109,9 +116,8 @@ class SessionManager:
         self._current_session_id = session_id
 
     @staticmethod
-    def _resolve_state_file(repo_path: str | None) -> Path:
-        root = Path(repo_path) if repo_path else Path.cwd()
-        return root / ".ai-review" / "runtime" / "sessions.json"
+    def _resolve_state_file() -> Path:
+        return Path.cwd() / ".ai-review" / "runtime" / "sessions.json"
 
     def _load_state(self) -> None:
         if not self._state_file.exists():
@@ -144,35 +150,103 @@ class SessionManager:
         except Exception:
             logger.exception("Failed to load persisted session state from %s", self._state_file)
 
+    _DEFAULT_PRESETS: list[dict[str, str]] = [
+        {"id": "preset-claude-code", "client_type": "claude-code", "role": "general", "color": "#8B5CF6", "avatar": "🟣"},
+        {"id": "preset-codex", "client_type": "codex", "role": "general", "color": "#22C55E", "avatar": "🟢"},
+        {"id": "preset-gemini", "client_type": "gemini", "role": "general", "color": "#3B82F6", "avatar": "🔵"},
+    ]
+
+    def _ensure_default_presets(self) -> None:
+        """Seed default presets only on first run (no presets at all)."""
+        if self.agent_presets:
+            return
+        for preset in self._DEFAULT_PRESETS:
+            self.agent_presets[preset["id"]] = ModelConfig(**preset)
+        self.persist()
+
     def persist(self) -> None:
-        """Persist all sessions to disk for restart recovery."""
+        """Mark state as dirty and schedule a debounced flush.
+
+        Falls back to synchronous write when no event loop is running
+        (e.g. during ``__init__`` or in synchronous tests).
+        """
+        self._dirty = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop — write synchronously.
+            self._sync_write()
+            return
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+        self._flush_handle = loop.call_later(
+            self._DEBOUNCE_SECONDS, self._enqueue_flush,
+        )
+
+    def _enqueue_flush(self) -> None:
+        """Callback from debounce timer; creates an async flush task."""
+        self._flush_handle = None
+        asyncio.ensure_future(self._flush_async())
+
+    async def _flush_async(self) -> None:
+        """Perform the actual I/O flush in a worker thread (with lock)."""
+        async with self._flush_lock:
+            if not self._dirty:
+                return
+            snapshot = self._build_snapshot()
+            self._dirty = False
+            await asyncio.to_thread(self._write_snapshot, snapshot)
+
+    async def flush(self) -> None:
+        """Immediate flush for shutdown — cancels any pending debounce."""
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        if self._dirty:
+            await self._flush_async()
+
+    def _build_snapshot(self) -> dict:
+        """Build a JSON-serializable state snapshot (CPU-bound, runs on main thread)."""
+        return {
+            "current_session_id": self._current_session_id,
+            "sessions": [s.model_dump(mode="json") for s in self.sessions.values()],
+            "agent_presets": [p.model_dump(mode="json") for p in self.agent_presets.values()],
+        }
+
+    def _write_snapshot(self, payload: dict) -> None:
+        """Write snapshot to disk (safe to call from worker thread)."""
         try:
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "current_session_id": self._current_session_id,
-                "sessions": [s.model_dump(mode="json") for s in self.sessions.values()],
-                "agent_presets": [p.model_dump(mode="json") for p in self.agent_presets.values()],
-            }
             temp = self._state_file.with_suffix(".tmp")
-            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
             temp.replace(self._state_file)
         except Exception:
             logger.exception("Failed to persist session state to %s", self._state_file)
 
+    def _sync_write(self) -> None:
+        """Synchronous fallback for when no event loop is available."""
+        if not self._dirty:
+            return
+        snapshot = self._build_snapshot()
+        self._dirty = False
+        self._write_snapshot(snapshot)
+
     async def start_review(
         self,
         base: str = "main",
-        head: str | None = None,
-        repo_path: str | None = None,
+        *,
+        head: str,
+        repo_path: str,
         preset_ids: list[str] | None = None,
+        implementation_context: dict | None = None,
     ) -> dict:
         """Start a new review session: collect diff and knowledge."""
-        effective_repo = repo_path or self.repo_path
-
         # Load config
-        config = load_config(effective_repo) if effective_repo else None
+        config = load_config(repo_path)
 
-        session = ReviewSession(base=base, repo_path=effective_repo or "")
+        session = ReviewSession(base=base, repo_path=repo_path)
         if preset_ids is not None:
             if not isinstance(preset_ids, list):
                 raise ValueError("preset_ids must be a list")
@@ -189,8 +263,17 @@ class SessionManager:
             if missing:
                 raise ValueError(f"Unknown preset ids: {', '.join(missing)}")
             session.config.models = resolved
-        elif config:
+        elif config and config.models:
             session.config = config
+        else:
+            # Use all enabled agent presets as default reviewers
+            enabled = [
+                ModelConfig.model_validate(mc.model_dump(mode="json"))
+                for mc in self.agent_presets.values()
+                if mc.enabled
+            ]
+            if enabled:
+                session.config.models = enabled
 
         self.sessions[session.id] = session
         self._current_session_id = session.id
@@ -200,14 +283,17 @@ class SessionManager:
         self.broker.publish("phase_change", {"status": "collecting", "session_id": session.id})
 
         # Collect diff
-        if effective_repo:
-            session.head = head or await get_current_branch(effective_repo)
-            session.diff = await collect_diff(base, effective_repo, head=session.head)
-            session.knowledge = load_knowledge(effective_repo)
+        session.head = head
+        session.diff = await collect_diff(base, repo_path, head=head)
+        session.knowledge = load_knowledge(repo_path)
 
         # Transition to REVIEWING
         transition(session, SessionStatus.REVIEWING)
         self.broker.publish("phase_change", {"status": "reviewing", "session_id": session.id})
+
+        # Apply inline implementation context if provided
+        if implementation_context:
+            self.submit_implementation_context(session.id, implementation_context)
 
         summary = get_diff_summary(session.diff)
         summary["session_id"] = session.id
@@ -665,97 +751,6 @@ class SessionManager:
     def _current_turn(session: ReviewSession) -> int:
         return max((i.turn for i in session.issues), default=0)
 
-    def submit_overall_review(
-        self,
-        session_id: str,
-        model_id: str,
-        merge_decision: str = "needs_discussion",
-        summary: str = "",
-        task_type: str = "review",
-        turn: int | None = None,
-        highlights: list[str] | None = None,
-        blockers: list[str] | None = None,
-        recommendations: list[str] | None = None,
-    ) -> dict:
-        """Submit or update an overall reviewer verdict for a specific turn."""
-        session = self.get_session(session_id)
-        if session.status in (SessionStatus.IDLE, SessionStatus.COLLECTING):
-            raise ValueError(f"Cannot submit overall review in {session.status.value} state")
-
-        task = AgentTaskType(task_type)
-        if turn is None:
-            turn = 0 if task == AgentTaskType.REVIEW else self._current_turn(session)
-        if turn < 0:
-            raise ValueError("turn must be >= 0")
-
-        decision = MergeDecision(merge_decision)
-        normalized_highlights = self._normalize_notes(highlights)
-        normalized_blockers = self._normalize_notes(blockers)
-        normalized_recommendations = self._normalize_notes(recommendations)
-
-        existing = next(
-            (
-                r for r in session.overall_reviews
-                if r.model_id == model_id and r.task_type == task and r.turn == turn
-            ),
-            None,
-        )
-
-        if existing is None:
-            existing = OverallReview(
-                model_id=model_id,
-                task_type=task,
-                turn=turn,
-                merge_decision=decision,
-                summary=summary or "",
-                highlights=normalized_highlights,
-                blockers=normalized_blockers,
-                recommendations=normalized_recommendations,
-            )
-            session.overall_reviews.append(existing)
-            status = "accepted"
-        else:
-            existing.merge_decision = decision
-            existing.summary = summary or ""
-            existing.highlights = normalized_highlights
-            existing.blockers = normalized_blockers
-            existing.recommendations = normalized_recommendations
-            existing.submitted_at = _utcnow()
-            status = "updated"
-
-        self.broker.publish(
-            "overall_review_submitted",
-            {
-                "session_id": session_id,
-                "model_id": model_id,
-                "task_type": task.value,
-                "turn": turn,
-                "merge_decision": decision.value,
-            },
-        )
-
-        self.persist()
-        return {
-            "status": status,
-            "turn": turn,
-            "task_type": task.value,
-            "overall_review_count": len(session.overall_reviews),
-            "overall_review": existing.model_dump(mode="json"),
-        }
-
-    def get_overall_reviews(self, session_id: str, turn: int | None = None) -> list[dict]:
-        """Get overall reviewer verdicts for a session (optionally filtered by turn)."""
-        session = self.get_session(session_id)
-        reviews = session.overall_reviews
-        if turn is not None:
-            reviews = [r for r in reviews if r.turn == turn]
-        ordered = sorted(
-            reviews,
-            key=lambda r: (r.turn, r.task_type.value, r.submitted_at),
-            reverse=True,
-        )
-        return [r.model_dump(mode="json") for r in ordered]
-
     def create_issues_from_reviews(self, session_id: str) -> list[Issue]:
         """Create Issue objects from all submitted RawIssues (pre-dedup)."""
         session = self.get_session(session_id)
@@ -1034,6 +1029,18 @@ class SessionManager:
 
         for issue in session.issues:
             if issue.id == issue_id:
+                parsed_action = OpinionAction(action)
+
+                # FALSE_POSITIVE validation: raiser cannot mark own issue
+                if parsed_action == OpinionAction.FALSE_POSITIVE:
+                    if model_id == issue.raised_by:
+                        raise ValueError("Original raiser cannot submit false_positive on own issue")
+
+                # WITHDRAW validation: only raiser can withdraw
+                if parsed_action == OpinionAction.WITHDRAW:
+                    if model_id != issue.raised_by:
+                        raise ValueError("Only the original raiser can withdraw an issue")
+
                 # Human 의견은 새 턴을 열고 이슈를 재오픈해 모든 에이전트가 다시 검토하도록 유도
                 if is_human_like:
                     issue.turn += 1
@@ -1042,7 +1049,8 @@ class SessionManager:
                 target_turn = issue.turn
 
                 # Reject duplicate opinion from same model in same turn
-                if not is_human_like and any(
+                # WITHDRAW bypasses duplicate check (raiser already has RAISE in same turn)
+                if not is_human_like and parsed_action != OpinionAction.WITHDRAW and any(
                     op.model_id == model_id and op.turn == target_turn
                     for op in issue.thread
                 ):
@@ -1051,7 +1059,7 @@ class SessionManager:
                 sev = Severity(suggested_severity) if suggested_severity else None
                 opinion = Opinion(
                     model_id=model_id,
-                    action=OpinionAction(action),
+                    action=parsed_action,
                     reasoning=reasoning,
                     suggested_severity=sev,
                     confidence=max(0.0, min(float(confidence), 1.0)),
@@ -1059,6 +1067,12 @@ class SessionManager:
                     mentions=sorted(set((mentions or []) + self._extract_mentions(reasoning, session))),
                 )
                 issue.thread.append(opinion)
+
+                # WITHDRAW: immediately close the issue
+                if parsed_action == OpinionAction.WITHDRAW:
+                    issue.consensus = True
+                    issue.consensus_type = "closed"
+                    issue.final_severity = Severity.DISMISSED
 
                 self.broker.publish(
                     "opinion_submitted",
@@ -1112,7 +1126,6 @@ class SessionManager:
             "base": session.base,
             "head": session.head,
             "review_count": len(session.reviews),
-            "overall_review_count": len(session.overall_reviews),
             "current_turn": self._current_turn(session),
             "issue_count": len(session.issues),
             "files_changed": len(session.diff),
@@ -1438,15 +1451,7 @@ class SessionManager:
 
         commits = [fc.model_dump(mode="json") for fc in session.fix_commits]
 
-        overall = [
-            {
-                "model_id": ov.model_id,
-                "merge_decision": ov.merge_decision,
-                "summary": ov.summary,
-                "task_type": ov.task_type,
-            }
-            for ov in session.overall_reviews
-        ]
+        dismissals_data = [d.model_dump(mode="json") for d in session.dismissals]
 
         return {
             "session_id": session.id,
@@ -1454,8 +1459,8 @@ class SessionManager:
             "issues": issues_data,
             "issue_responses": responses,
             "fix_commits": commits,
+            "dismissals": dismissals_data,
             "verification_round": session.verification_round,
-            "overall_reviews": overall,
             "implementation_context": (
                 session.implementation_context.model_dump(mode="json")
                 if session.implementation_context else None
@@ -1527,6 +1532,36 @@ class SessionManager:
 
         return "\n".join(lines)
 
+    def dismiss_issue(
+        self,
+        session_id: str,
+        issue_id: str,
+        reasoning: str = "",
+        dismissed_by: str = "",
+    ) -> dict:
+        """Dismiss a fix_required issue during FIXING state."""
+        session = self.get_session(session_id)
+        if session.status != SessionStatus.FIXING:
+            raise ValueError(f"Cannot dismiss in {session.status.value} state")
+        issue = next((i for i in session.issues if i.id == issue_id), None)
+        if issue is None:
+            raise KeyError(f"Issue not found: {issue_id}")
+        if issue.consensus_type != "fix_required":
+            raise ValueError("Can only dismiss fix_required issues")
+        if any(d.issue_id == issue_id for d in session.dismissals):
+            raise ValueError(f"Already dismissed: {issue_id}")
+        dismissal = IssueDismissal(
+            issue_id=issue_id, reasoning=reasoning, dismissed_by=dismissed_by,
+        )
+        session.dismissals.append(dismissal)
+        self.broker.publish("issue_dismissed", {
+            "session_id": session_id, "issue_id": issue_id,
+        })
+        if self.on_issue_dismissed is not None:
+            self.on_issue_dismissed(session_id, issue_id)
+        self.persist()
+        return {"status": "dismissed", "issue_id": issue_id}
+
     def get_actionable_issues(self, session_id: str) -> dict:
         """Return unresolved fix_required issues grouped by file."""
         session = self.get_session(session_id)
@@ -1534,6 +1569,8 @@ class SessionManager:
         addressed_ids: set[str] = set()
         for fc in session.fix_commits:
             addressed_ids.update(fc.issues_addressed)
+
+        dismissed_ids = {d.issue_id for d in session.dismissals}
 
         actionable: list[dict] = []
         by_file: dict[str, list] = {}
@@ -1551,6 +1588,7 @@ class SessionManager:
                 "description": issue.description,
                 "suggestion": issue.suggestion,
                 "addressed": issue.id in addressed_ids,
+                "dismissed": issue.id in dismissed_ids,
             }
             actionable.append(entry)
             by_file.setdefault(issue.file, []).append(entry)
