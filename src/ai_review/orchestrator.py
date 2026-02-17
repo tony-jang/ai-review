@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from ai_review.consensus import apply_consensus
 from ai_review.dedup import deduplicate_issues
 from ai_review.models import AgentState, AgentStatus, AgentTaskType, IssueResponseAction, ModelConfig, OpinionAction, SessionStatus, _utcnow
-from ai_review.prompts import build_deliberation_prompt, build_review_prompt, build_verification_prompt
+from ai_review.prompts import build_deliberation_prompt, build_false_positive_review_prompt, build_review_prompt, build_verification_prompt
 from ai_review.state import can_transition, transition
 from ai_review.trigger.base import TriggerEngine
 from ai_review.trigger.cc import ClaudeCodeTrigger
@@ -336,6 +336,23 @@ class Orchestrator:
             self._safe_fire_and_forget(self._check_verification_complete(session_id), name=f"verify-check-{session_id[:8]}")
             return
 
+        # Find the opinion that was just submitted
+        issue = next((i for i in session.issues if i.id == issue_id), None)
+        latest_op = issue.thread[-1] if issue and issue.thread else None
+
+        # WITHDRAW: issue already closed by session_manager — just advance
+        if latest_op and latest_op.action == OpinionAction.WITHDRAW:
+            self._safe_fire_and_forget(self._check_and_advance(session_id), name=f"check-advance-{session_id[:8]}")
+            return
+
+        # FALSE_POSITIVE: trigger re-review for the original raiser
+        if latest_op and latest_op.action == OpinionAction.FALSE_POSITIVE:
+            self._safe_fire_and_forget(
+                self._trigger_false_positive_review(session_id, issue),
+                name=f"fp-review-{session_id[:8]}",
+            )
+            return
+
         if model_id in human_like:
             # Human comment opens a new turn on the issue. Re-trigger pending agents immediately.
             self._safe_fire_and_forget(self._trigger_deliberation_round(session_id), name=f"delib-round-{session_id[:8]}")
@@ -647,6 +664,71 @@ class Orchestrator:
                 name=f"deliberate-{session_id[:8]}-{mc.id}",
             )
             session_tasks.append(task)
+        self.manager.persist()
+
+    async def _trigger_false_positive_review(self, session_id: str, issue) -> None:
+        """Send a re-review prompt to the original raiser after a FALSE_POSITIVE opinion."""
+        session = self.manager.get_session(session_id)
+        raiser_id = issue.raised_by
+        mc = next((m for m in session.config.models if m.id == raiser_id and m.enabled), None)
+        if mc is None:
+            return
+
+        agent_key = self.manager.ensure_agent_access_key(session_id, mc.id)
+
+        # Find who submitted the false_positive
+        fp_submitter = ""
+        for op in reversed(issue.thread):
+            if op.action == OpinionAction.FALSE_POSITIVE:
+                fp_submitter = op.model_id
+                break
+
+        prompt = build_false_positive_review_prompt(
+            session_id=session_id,
+            model_config=mc,
+            issue_id=issue.id,
+            fp_submitter=fp_submitter,
+            api_base_url=self.api_base_url,
+            agent_key=agent_key,
+        )
+
+        # Update agent state
+        if mc.id in session.agent_states:
+            session.agent_states[mc.id].status = AgentStatus.REVIEWING
+            session.agent_states[mc.id].task_type = AgentTaskType.DELIBERATION
+            session.agent_states[mc.id].started_at = _utcnow()
+            session.agent_states[mc.id].submitted_at = None
+            session.agent_states[mc.id].prompt_preview = prompt[:200]
+            session.agent_states[mc.id].prompt_full = prompt
+            self.manager.update_agent_runtime(
+                session_id, mc.id,
+                reason="false_positive re-review started",
+                output="", error="",
+            )
+            self.manager.broker.publish("agent_status", {
+                "session_id": session_id,
+                "model_id": mc.id,
+                "status": "reviewing",
+                "task_type": "deliberation",
+                "prompt_preview": prompt[:200],
+            })
+
+        session_triggers = self._triggers.get(session_id, {})
+        trigger = session_triggers.get(mc.id)
+        if not trigger:
+            return
+
+        client_sid = session.client_sessions.get(mc.id)
+        if not client_sid:
+            client_sid = await trigger.create_session(mc.id)
+            session.client_sessions[mc.id] = client_sid
+
+        session_tasks = self._pending_tasks.setdefault(session_id, [])
+        task = asyncio.create_task(
+            self._fire_trigger(session_id, trigger, client_sid, mc.id, prompt, model_config=mc),
+            name=f"fp-review-{session_id[:8]}-{mc.id}",
+        )
+        session_tasks.append(task)
         self.manager.persist()
 
     async def _check_and_advance(self, session_id: str) -> None:
