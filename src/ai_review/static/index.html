@@ -63,6 +63,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   60% { box-shadow: inset 0 0 0 2px rgba(88,166,255,0.55); background: rgba(88,166,255,0.18); }
   100% { box-shadow: inset 0 0 0 0 rgba(88,166,255,0); background: inherit; }
 }
+.opinion-flash { animation: opinion-flash-anim 1.2s ease; }
+@keyframes opinion-flash-anim {
+  0% { box-shadow: inset 0 0 0 2px rgba(88,166,255,0.8); background: rgba(88,166,255,0.15); }
+  100% { box-shadow: inset 0 0 0 0 rgba(88,166,255,0); background: inherit; }
+}
 .issue-icon { font-size: 12px; margin-top: 3px; }
 .issue-info { flex: 1; min-width: 0; }
 .issue-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -103,7 +108,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .reviewer-more:hover { border-color: var(--accent); color: var(--accent); background: rgba(88,166,255,0.12); }
 .reviewer-caret { margin-left: 6px; font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
 .reviewer-meta { margin-top: 7px; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
-.reviewer-meta .overall-badge { font-size: 10px; padding: 1px 6px; }
 .reviewer-time { margin-left: auto; font-size: 10px; color: var(--text-muted); font-family: 'SF Mono', Monaco, monospace; }
 .reviewer-issues { padding: 8px 9px 9px; background: rgba(255,255,255,0.015); display: grid; gap: 6px; }
 .reviewer-issues-empty { border: 1px dashed var(--border); border-radius: 6px; padding: 10px 8px; text-align: center; font-size: 11px; color: var(--text-muted); }
@@ -155,32 +159,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .agent-session-summary > p:first-child { margin-top: 0; }
 .agent-session-summary > p:last-child { margin-bottom: 0; }
 .agent-session-empty { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
-.overall-board { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
-.overall-board-header { border: 1px solid var(--border); border-radius: 10px; background: linear-gradient(180deg, rgba(88,166,255,0.1), rgba(88,166,255,0.03)); padding: 14px 16px; }
-.overall-board-header .title { font-size: 14px; font-weight: 700; color: var(--text); }
-.overall-board-header .hint { margin-top: 4px; font-size: 12px; color: var(--text-muted); }
-.overall-turn-section { border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,0.015); overflow: hidden; }
-.overall-turn-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02); }
-.overall-turn-title { font-size: 12px; font-weight: 700; color: var(--accent); }
-.overall-turn-count { font-size: 11px; color: var(--text-muted); }
-.overall-card-grid { display: grid; gap: 10px; padding: 10px; }
-.overall-card { border: 1px solid var(--border); border-radius: 8px; background: var(--card); padding: 10px 12px; }
-.overall-card-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-.overall-model { font-size: 13px; font-weight: 700; }
-.overall-time { margin-left: auto; font-size: 11px; color: var(--text-muted); font-family: 'SF Mono', Monaco, monospace; }
-.overall-badge { font-size: 10px; font-weight: 700; border-radius: 999px; padding: 2px 7px; border: 1px solid transparent; }
-.overall-task { background: rgba(88,166,255,0.1); color: var(--accent); border-color: rgba(88,166,255,0.35); }
-.overall-decision-mergeable { background: rgba(34,197,94,0.13); color: #22C55E; border-color: rgba(34,197,94,0.4); }
-.overall-decision-not-mergeable { background: rgba(239,68,68,0.13); color: #EF4444; border-color: rgba(239,68,68,0.4); }
-.overall-decision-needs-discussion { background: rgba(234,179,8,0.14); color: #EAB308; border-color: rgba(234,179,8,0.4); }
-.overall-summary { margin-top: 8px; font-size: 13px; color: var(--text); line-height: 1.5; }
-.overall-summary > p:first-child { margin-top: 0; }
-.overall-summary > p:last-child { margin-bottom: 0; }
-.overall-summary-empty { color: var(--text-muted); font-style: italic; }
-.overall-notes { margin-top: 8px; display: grid; gap: 6px; }
-.overall-note-title { font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
-.overall-note-list { margin: 0 0 0 16px; font-size: 12px; color: var(--text-muted); line-height: 1.45; }
-.overall-note-list li { margin: 1px 0; }
 
 .detail-header-bar { padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--card); }
 .detail-header-bar.detail-flash { animation: detail-header-flash 1s ease; }
@@ -265,9 +243,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .diff-split-table td.diff-context { background: transparent; color: var(--text-muted); }
 .diff-split-table td.diff-empty { background: rgba(255,255,255,0.02); color: var(--text-muted); }
 .diff-split-row-stack td { border-top: 1px dashed rgba(255,255,255,0.06); }
-/* Issue marker on diff line */
-.diff-issue-marker { position: relative; }
-.diff-issue-marker::after { content: ''; position: absolute; left: 0; right: 0; top: 0; bottom: 0; border: 1px solid var(--severity-critical); border-radius: 2px; pointer-events: none; opacity: 0.5; }
+/* Issue marker on diff line — GitHub-style yellow highlight */
+tr.diff-issue-marker > td { background: rgba(187, 128, 9, 0.15) !important; }
+tr.diff-issue-marker > td.diff-line-num { color: var(--text); opacity: 0.7; }
+td.diff-issue-marker { background: rgba(187, 128, 9, 0.15) !important; }
+td.diff-issue-marker.diff-line-num { color: var(--text); opacity: 0.7; }
 .diff-loading { padding: 24px; text-align: center; color: var(--text-muted); font-size: 13px; }
 
 /* Thread panel */
@@ -288,6 +268,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .action-raise { background: rgba(239,68,68,0.15); color: var(--severity-critical); }
 .action-fix_required { background: rgba(34,197,94,0.15); color: var(--severity-dismissed); }
 .action-no_fix { background: rgba(239,68,68,0.15); color: var(--severity-critical); }
+.action-false_positive { background: rgba(168,85,247,0.15); color: #A855F7; }
+.action-withdraw { background: rgba(107,114,128,0.15); color: #6B7280; }
 .action-comment { background: rgba(234,179,8,0.15); color: var(--severity-medium); }
 /* backward compat */
 .action-agree { background: rgba(34,197,94,0.15); color: var(--severity-dismissed); }
@@ -871,7 +853,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
     <div class="detail-view-bar">
       <div class="detail-view-group">
         <button type="button" id="detail-view-issue" class="detail-view-btn active" onclick="setDetailViewMode('issue')">이슈 상세</button>
-        <button type="button" id="detail-view-overall" class="detail-view-btn" onclick="setDetailViewMode('overall')">종합 의견</button>
       </div>
     </div>
     <div class="right-main-layout">
@@ -906,9 +887,7 @@ const MODEL_COLORS = { opus:'#8B5CF6', gpt:'#22C55E', gemini:'#3B82F6', deepseek
 const SEVERITY_COLORS = { critical:'#EF4444', high:'#F97316', medium:'#EAB308', low:'#6B7280', dismissed:'#22C55E' };
 const SEVERITY_ICONS = { critical:'\uD83D\uDD34', high:'\uD83D\uDFE0', medium:'\uD83D\uDFE1', low:'\u26AA', dismissed:'\u2705' };
 const SEVERITY_LABELS = { critical:'심각', high:'높음', medium:'보통', low:'낮음', dismissed:'기각' };
-const ACTION_LABELS = { raise:'제기', fix_required:'수정 필요', no_fix:'수정 불필요', comment:'의견', agree:'수정 필요', disagree:'수정 불필요', clarify:'의견' };
-const MERGE_DECISION_LABELS = { mergeable:'머지 가능', not_mergeable:'머지 불가능', needs_discussion:'추가 토론 필요' };
-const TASK_TYPE_LABELS = { review:'리뷰', deliberation:'토론' };
+const ACTION_LABELS = { raise:'제기', fix_required:'수정 필요', no_fix:'수정 불필요', false_positive:'오탐', withdraw:'철회', comment:'의견', agree:'수정 필요', disagree:'수정 불필요', clarify:'의견' };
 const STEPS = [
   { key:'collecting', label:'수집' },
   { key:'agents', label:'에이전트' },
@@ -933,7 +912,6 @@ let state = {
   currentTurn:0,
   detailViewMode:'issue',
   issues:[],
-  overallReviews:[],
   humanAssistAccessKey:null,
   issueNumberById:{},
   nextIssueNumber:1,
@@ -970,6 +948,91 @@ let _fileFilterPopoverBound = false;
 let _fileTreeAutoExpandedPath = '';
 let _humanAssistKeyBySession = {};
 let _pendingOpinionJump = null;
+
+// --- URL Router ---
+const router = {
+  _ID_RE: /^[0-9a-f]{12}$/,
+  parse(url) {
+    const path = (url ? new URL(url, location.origin).pathname : location.pathname).replace(/\/+$/, '') || '/';
+    const hash = url ? new URL(url, location.origin).hash : location.hash;
+    const parts = path.split('/').filter(Boolean);
+    const result = { sessionId: null, issueId: null, viewMode: 'issue', opinionId: null };
+    if (parts.length >= 1 && this._ID_RE.test(parts[0])) {
+      result.sessionId = parts[0];
+      if (parts.length >= 3 && parts[1] === 'issues' && this._ID_RE.test(parts[2])) {
+        result.issueId = parts[2];
+      }
+    }
+    if (hash && hash.startsWith('#op-')) {
+      result.opinionId = hash.slice(4);
+    }
+    return result;
+  },
+  buildUrl(opts) {
+    const sid = opts.sessionId || state.sessionId;
+    if (!sid) return '/';
+    let path = `/${sid}`;
+    if (opts.issueId) {
+      path += `/issues/${opts.issueId}`;
+    }
+    if (opts.opinionId) path += `#op-${opts.opinionId}`;
+    return path;
+  },
+  push(opts) {
+    const url = this.buildUrl(opts);
+    if (url !== location.pathname + location.hash) {
+      history.pushState(null, '', url);
+    }
+  },
+  replace(opts) {
+    const url = this.buildUrl(opts);
+    if (url !== location.pathname + location.hash) {
+      history.replaceState(null, '', url);
+    }
+  },
+  sync() {
+    const opts = { sessionId: state.sessionId, viewMode: state.detailViewMode };
+    if (state.detailViewMode === 'issue' && state.selectedIssue) {
+      opts.issueId = state.selectedIssue;
+    }
+    this.replace(opts);
+  }
+};
+
+function _scrollToOpinion(opinionId) {
+  const el = document.getElementById('op-' + opinionId);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('opinion-flash');
+  setTimeout(() => el.classList.remove('opinion-flash'), 1200);
+}
+
+window.addEventListener('popstate', async () => {
+  const parsed = router.parse();
+  if (!parsed.sessionId) {
+    // URL이 / 이면 현재 세션 유지
+    return;
+  }
+  const sessionExists = state.sessions.some(s => s.session_id === parsed.sessionId);
+  if (!sessionExists) {
+    router.replace({ sessionId: state.sessionId, viewMode: state.detailViewMode, issueId: state.selectedIssue });
+    return;
+  }
+  if (parsed.sessionId !== state.sessionId) {
+    await switchSession(parsed.sessionId);
+  }
+  if (parsed.issueId) {
+    const issueExists = state.issues.some(i => i.id === parsed.issueId);
+    if (issueExists) {
+      selectIssue(parsed.issueId);
+    }
+  } else {
+    setDetailViewMode('issue');
+  }
+  if (parsed.opinionId) {
+    setTimeout(() => _scrollToOpinion(parsed.opinionId), 100);
+  }
+});
 
 function _uiReadFiltersFromDom() {
   return {
@@ -1580,6 +1643,11 @@ function renderMd(s) {
   t = t.replace(/```([\s\S]*?)```/g, (_m, code) => save(`<pre><code>${code}</code></pre>`));
   t = t.replace(/`([^`\n]+)`/g, (_m, code) => save(`<code>${code}</code>`));
 
+  t = t.replace(/^(#{1,4})\s+(.+)$/gm, (_m, h, text) => {
+    const sz = {1:'20px',2:'18px',3:'16px',4:'14px'}[h.length] || '14px';
+    return save(`<div style="font-size:${sz};font-weight:700;margin:12px 0 6px;color:var(--text)">${text}</div>`);
+  });
+
   t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   t = t.replace(/~~([^~]+)~~/g, '<del>$1</del>');
   t = t.replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s),.!?:;])/g, '$1<em>$2</em>');
@@ -1612,100 +1680,12 @@ function formatTs(ts) {
   if (Number.isNaN(d.getTime())) return '';
   return d.toLocaleString('ko-KR', { hour12: false });
 }
-function _overallDecisionClass(decision) {
-  if (decision === 'mergeable') return 'overall-decision-mergeable';
-  if (decision === 'not_mergeable') return 'overall-decision-not-mergeable';
-  return 'overall-decision-needs-discussion';
-}
-function _taskTypeLabel(taskType) {
-  return TASK_TYPE_LABELS[taskType] || taskType || '리뷰';
-}
-function _renderOverallNotes(title, items) {
-  const list = Array.isArray(items) ? items.filter(Boolean) : [];
-  if (!list.length) return '';
-  return `<div class="overall-note-section">
-    <div class="overall-note-title">${esc(title)}</div>
-    <ul class="overall-note-list">${list.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>
-  </div>`;
-}
-function renderOverallReviewBoard() {
-  const reviews = Array.isArray(state.overallReviews) ? state.overallReviews : [];
-  if (!reviews.length) return '';
-
-  const grouped = new Map();
-  for (const review of reviews) {
-    const turn = Number.isInteger(review.turn) ? review.turn : Number(review.turn || 0);
-    const turnKey = Number.isFinite(turn) ? turn : 0;
-    if (!grouped.has(turnKey)) grouped.set(turnKey, []);
-    grouped.get(turnKey).push(review);
-  }
-
-  const turns = [...grouped.keys()].sort((a, b) => b - a);
-  const sections = turns.map((turn) => {
-    const items = grouped.get(turn)
-      .slice()
-      .sort((a, b) => new Date(b.submitted_at || 0).getTime() - new Date(a.submitted_at || 0).getTime());
-
-    const cards = items.map((review) => {
-      const decision = review.merge_decision || 'needs_discussion';
-      const decisionLabel = MERGE_DECISION_LABELS[decision] || decision;
-      const decisionClass = _overallDecisionClass(decision);
-      const taskLabel = _taskTypeLabel(review.task_type);
-      const modelColor = getModelColor(review.model_id);
-      const summary = String(review.summary || '').trim();
-      const submitted = formatTs(review.submitted_at);
-      return `<div class="overall-card">
-        <div class="overall-card-head">
-          <span class="model-dot" style="background:${modelColor}"></span>
-          <span class="overall-model" style="color:${modelColor}">${esc(review.model_id || 'unknown')}</span>
-          <span class="overall-badge ${decisionClass}">${esc(decisionLabel)}</span>
-          <span class="overall-badge overall-task">${esc(taskLabel)}</span>
-          ${submitted ? `<span class="overall-time">${esc(submitted)}</span>` : ''}
-        </div>
-        ${summary ? `<div class="overall-summary">${renderMd(summary)}</div>` : '<div class="overall-summary overall-summary-empty">요약이 아직 없습니다.</div>'}
-        <div class="overall-notes">
-          ${_renderOverallNotes('핵심 포인트', review.highlights)}
-          ${_renderOverallNotes('머지 차단 사유', review.blockers)}
-          ${_renderOverallNotes('권장 사항', review.recommendations)}
-        </div>
-      </div>`;
-    }).join('');
-
-    return `<div class="overall-turn-section">
-      <div class="overall-turn-header">
-        <span class="overall-turn-title">턴 ${turn} 종합 의견</span>
-        <span class="overall-turn-count">${items.length}명 제출</span>
-      </div>
-      <div class="overall-card-grid">${cards}</div>
-    </div>`;
-  }).join('');
-
-  return `<div class="overall-board">
-    <div class="overall-board-header">
-      <div class="title">리뷰어 종합 의견</div>
-      <div class="hint">각 에이전트가 턴별로 제출한 최종 머지 판단입니다.</div>
-    </div>
-    ${sections}
-  </div>`;
-}
 function renderIssueDetailEmpty() {
   return '<div class="empty-state"><div class="icon">&#128221;</div><div class="message">이슈를 선택하세요</div><div class="hint">이슈를 클릭하면 코드와 토론을 볼 수 있습니다</div></div>';
-}
-function renderOverallDetailEmpty() {
-  const boardHtml = renderOverallReviewBoard();
-  if (boardHtml) return boardHtml;
-  return '<div class="empty-state"><div class="icon">&#128172;</div><div class="message">종합 의견이 아직 없습니다</div><div class="hint">에이전트가 종합 의견을 제출하면 여기에 표시됩니다</div></div>';
 }
 function renderAgentSessionDetail() {
   if (!state.agents.length) {
     return '<div class="empty-state"><div class="icon">&#129302;</div><div class="message">에이전트가 없습니다</div><div class="hint">프리셋을 선택해 세션을 시작하세요</div></div>';
-  }
-
-  const latestByModel = {};
-  for (const review of (state.overallReviews || [])) {
-    const modelId = review?.model_id;
-    if (!modelId || latestByModel[modelId]) continue;
-    latestByModel[modelId] = review;
   }
 
   const statusLabel = (status) => {
@@ -1718,41 +1698,29 @@ function renderAgentSessionDetail() {
   return `<div class="agent-session-board">${
     state.agents.map((agent) => {
       const modelColor = getModelColor(agent.model_id);
-      const latest = latestByModel[agent.model_id] || null;
-      const decision = latest?.merge_decision || '';
-      const decisionLabel = decision ? (MERGE_DECISION_LABELS[decision] || decision) : '';
-      const decisionClass = decision ? _overallDecisionClass(decision) : '';
-      const summary = (latest?.summary || '').trim();
       return `<div class="agent-session-card">
         <div class="agent-session-head">
           <span class="model-dot" style="background:${modelColor}"></span>
           <span class="agent-session-name" style="color:${modelColor}">${esc(agent.model_id)}</span>
           ${agent.role ? `<span class="agent-session-role">${esc(agent.role)}</span>` : ''}
           <span class="agent-session-status">${esc(statusLabel(agent.status))}</span>
-          ${decisionLabel ? `<span class="overall-badge ${decisionClass}">${esc(decisionLabel)}</span>` : ''}
-          ${latest?.task_type ? `<span class="overall-badge overall-task">${esc(_taskTypeLabel(latest.task_type))}</span>` : ''}
           <button class="btn" style="margin-left:auto;padding:4px 8px;font-size:11px" onclick="openAgentChat('${esc(agent.model_id)}')">대화</button>
         </div>
-        ${
-          summary
-            ? `<div class="agent-session-summary">${renderMd(summary)}</div>`
-            : '<div class="agent-session-empty">아직 종합 의견이 없습니다.</div>'
-        }
+        <div class="agent-session-empty">에이전트 활동을 추적 중입니다.</div>
       </div>`;
     }).join('')
   }</div>`;
 }
 function renderDetailViewBar() {
   const issueBtn = document.getElementById('detail-view-issue');
-  const overallBtn = document.getElementById('detail-view-overall');
-  if (!issueBtn || !overallBtn) return;
+  if (!issueBtn) return;
   issueBtn.classList.toggle('active', state.detailViewMode === 'issue');
-  overallBtn.classList.toggle('active', state.detailViewMode === 'overall');
 }
 function setDetailViewMode(mode) {
-  const target = mode === 'overall' ? 'overall' : 'issue';
+  const target = 'issue';
   if (state.detailViewMode === target) return;
   state.detailViewMode = target;
+  router.push({ issueId: state.selectedIssue });
   renderDetailViewBar();
   renderIssueDetail();
 }
@@ -2193,7 +2161,7 @@ function _syncSelectedFileTreeExpansion() {
 }
 
 function _fileTreeDefaultExpanded(depth) {
-  return depth <= 1;
+  return true;
 }
 
 function _isFileTreeExpanded(key, depth) {
@@ -2818,16 +2786,6 @@ function renderAgentPanel() {
     return;
   }
 
-  const latestByModel = {};
-  const reviews = Array.isArray(state.overallReviews) ? [...state.overallReviews] : [];
-  reviews
-    .sort((a, b) => new Date(b.submitted_at || 0).getTime() - new Date(a.submitted_at || 0).getTime())
-    .forEach((review) => {
-      const modelId = review?.model_id;
-      if (!modelId || latestByModel[modelId]) return;
-      latestByModel[modelId] = review;
-    });
-
   const statusLabel = (status) => {
     if (status === 'reviewing') return '진행중';
     if (status === 'submitted') return '완료';
@@ -2839,11 +2797,6 @@ function renderAgentPanel() {
     const modelId = String(agent.model_id || 'unknown');
     const modelIdEncoded = encodeURIComponent(modelId);
     const modelColor = getModelColor(modelId);
-    const latest = latestByModel[modelId] || null;
-    const decision = latest?.merge_decision || '';
-    const decisionLabel = decision ? (MERGE_DECISION_LABELS[decision] || decision) : '';
-    const decisionClass = decision ? _overallDecisionClass(decision) : '';
-    const taskLabel = latest?.task_type ? _taskTypeLabel(latest.task_type) : '';
     const elapsed = formatElapsed(agent.elapsed_seconds);
     const status = String(agent.status || 'idle');
     const expanded = !!state.reviewerExpanded[modelId];
@@ -2884,8 +2837,6 @@ function renderAgentPanel() {
           <span class="reviewer-caret">${expanded ? '▾' : '▸'}</span>
         </div>
         <div class="reviewer-meta">
-          ${decisionLabel ? `<span class="overall-badge ${decisionClass}">${esc(decisionLabel)}</span>` : ''}
-          ${taskLabel ? `<span class="overall-badge overall-task">${esc(taskLabel)}</span>` : ''}
           <span class="reviewer-time" data-reviewer-time-model="${_escapeAttr(modelId)}" ${elapsed ? '' : 'style="display:none"'}>${esc(elapsed || '')}</span>
         </div>
         <div class="reviewer-activity" data-activity-model="${_escapeAttr(modelId)}" style="display:none"></div>
@@ -3224,10 +3175,6 @@ async function renderIssueDetail() {
   const renderSeq = ++_issueDetailRenderSeq;
   const el = document.getElementById('issue-detail');
   renderDetailViewBar();
-  if (state.detailViewMode === 'overall') {
-    el.innerHTML = renderOverallDetailEmpty();
-    return;
-  }
   if (!state.selectedIssue) { el.innerHTML = renderIssueDetailEmpty(); return; }
   const issue = state.issues.find(i=>i.id===state.selectedIssue);
   if (!issue) return;
@@ -3315,7 +3262,7 @@ async function renderIssueDetail() {
       const mColor = getModelColor(op.model_id);
       const actionClass = 'action-'+op.action;
       const rk = `th-${issue.id}-${idx}`;
-      html += `<div class="opinion" data-op-model="${_escapeAttr(op.model_id || '')}" data-op-time="${_escapeAttr(op.timestamp || '')}" data-op-action="${_escapeAttr(op.action || '')}">
+      html += `<div class="opinion" ${op.id ? `id="op-${_escapeAttr(op.id)}"` : ''} data-op-model="${_escapeAttr(op.model_id || '')}" data-op-time="${_escapeAttr(op.timestamp || '')}" data-op-action="${_escapeAttr(op.action || '')}">
         <div class="opinion-header">
           <span class="model-dot" style="background:${mColor}"></span>
           <span class="model-name" style="color:${mColor}">${esc(op.model_id)}</span>
@@ -3331,7 +3278,9 @@ async function renderIssueDetail() {
   }
 
   // Consensus
-  if (issue.consensus===true) {
+  if (issue.consensus===true && issue.consensus_type==='closed') {
+    html += `<div style="padding:0 20px 16px"><div class="consensus-box consensus-reached">\uD83D\uDEAB False Positive (종결)</div></div>`;
+  } else if (issue.consensus===true) {
     html += `<div style="padding:0 20px 16px"><div class="consensus-box consensus-reached">\u2705 합의 완료 \u2192 ${sevLabel(sev)}</div></div>`;
   } else if (discussionThread.length > 0) {
     html += `<div style="padding:0 20px 16px"><div class="consensus-box consensus-pending">\u23F3 합의 대기 중</div></div>`;
@@ -3344,6 +3293,7 @@ async function renderIssueDetail() {
       <div class="comment-actions">
         <button class="btn btn-agree" onclick="submitOpinion('${issue.id}','fix_required')">수정필요</button>
         <button class="btn btn-disagree" onclick="submitOpinion('${issue.id}','no_fix')">수정불필요</button>
+        <button class="btn" style="border-color:#A855F7;color:#A855F7" onclick="submitOpinion('${issue.id}','false_positive')">오탐</button>
         <button class="btn btn-comment" onclick="submitOpinion('${issue.id}','comment')">의견</button>
         <div class="spacer"></div>
         <select id="comment-severity" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px;">
@@ -3457,6 +3407,7 @@ function selectIssue(id) {
   _fileTreeAutoExpandedPath = '';
   if (state.sessionId && id) _uiSelectedIssueBySession[state.sessionId] = id;
   _uiSaveStateToStorage();
+  router.push({ viewMode: 'issue', issueId: id });
   renderFilePanel();
   renderIssueList();
   renderIssueDetail();
@@ -4129,16 +4080,22 @@ async function _amTestConnection(mode, btn) {
   const modelId = (document.getElementById(`${prefix}-model-id`)?.value || '').trim();
 
   if (btn) btn.disabled = true;
+  const startTime = Date.now();
+  let timerInterval = null;
   if (resultEl) {
     resultEl.className = 'conn-test-result';
-    resultEl.textContent = '테스트 중...';
+    resultEl.textContent = '테스트 중... 0초';
+    timerInterval = setInterval(() => {
+      const sec = Math.floor((Date.now() - startTime) / 1000);
+      resultEl.textContent = `테스트 중... ${sec}초`;
+    }, 1000);
   }
 
   try {
     const r = await fetch('/api/agents/connection-test', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ client_type: clientType, provider, model_id: modelId, timeout_seconds: 20 }),
+      body: JSON.stringify({ client_type: clientType, provider, model_id: modelId, timeout_seconds: 60 }),
     });
     const data = await r.json();
     if (!r.ok) {
@@ -4150,7 +4107,7 @@ async function _amTestConnection(mode, btn) {
     }
     if (data.ok) {
       if (resultEl) {
-        const elapsed = data.elapsed_ms != null ? `${data.elapsed_ms}ms` : '-';
+        const elapsed = data.elapsed_ms != null ? `${(data.elapsed_ms / 1000).toFixed(1)}초` : '-';
         resultEl.className = 'conn-test-result ok';
         resultEl.innerHTML = `${esc(`성공 (${elapsed}) · 콜백 수신 완료`)}${_amRenderConnectionTestDetail(data)}`;
       }
@@ -4165,6 +4122,7 @@ async function _amTestConnection(mode, btn) {
       resultEl.innerHTML = `${esc(`요청 실패: ${e.message}`)}${_amRenderConnectionTestDetail({ reason: e.message, status: 'request_error' })}`;
     }
   } finally {
+    if (timerInterval) clearInterval(timerInterval);
     if (btn) btn.disabled = false;
   }
 }
@@ -4687,10 +4645,6 @@ async function pollStatus() {
     btnProcess.style.display = (d.status === 'reviewing' && d.review_count > 0) ? '' : 'none';
     btnFinish.style.display = (d.status === 'deliberating' || d.status === 'reviewing') ? '' : 'none';
 
-    const or = await fetch(`/api/sessions/${state.sessionId}/overall-reviews`);
-    if (or.ok) state.overallReviews = await or.json();
-    else state.overallReviews = [];
-
     const ir = await fetch(`/api/sessions/${state.sessionId}/issues`);
     if (ir.ok) {
       const prev = state.selectedIssue ? JSON.stringify(state.issues.find(i => i.id === state.selectedIssue)) : null;
@@ -4740,7 +4694,6 @@ function connectSSE(sid) {
   src.addEventListener('phase_change', ()=>schedulePoll(50));
   src.addEventListener('review_submitted', ()=>schedulePoll(50));
   src.addEventListener('opinion_submitted', ()=>schedulePoll(50));
-  src.addEventListener('overall_review_submitted', ()=>schedulePoll(50));
   src.addEventListener('agent_status', ()=>schedulePoll(50));
   src.addEventListener('issue_created', ()=>schedulePoll(50));
   src.addEventListener('agent_config_changed', ()=>schedulePoll(50));
@@ -4894,7 +4847,6 @@ async function switchSession(sid) {
   state.currentTurn = 0;
   state.detailViewMode = 'issue';
   state.issues = [];
-  state.overallReviews = [];
   state.humanAssistAccessKey = _humanAssistKeyBySession[sid] || null;
   state.issueNumberById = {};
   state.nextIssueNumber = 1;
@@ -4911,6 +4863,7 @@ async function switchSession(sid) {
   state.expandedReasoning = {};
   state.reviewerExpanded = {};
   _uiSaveStateToStorage();
+  router.push({ sessionId: sid, viewMode: 'issue', issueId: state.selectedIssue });
   renderSessionTabs();
   connectSSE(sid);
   await pollStatus();
@@ -4935,7 +4888,6 @@ async function deleteSession(sid) {
       state.currentTurn = 0;
       state.detailViewMode = 'issue';
       state.issues = [];
-      state.overallReviews = [];
       state.humanAssistAccessKey = null;
       state.files = [];
       state.fileTreeExpanded = {};
@@ -4951,6 +4903,7 @@ async function deleteSession(sid) {
       renderAgentPanel();
       document.getElementById('file-panel').style.display = 'none';
       _uiSaveStateToStorage();
+      router.replace({ sessionId: null });
     }
   } else {
     renderSessionTabs();
@@ -5186,6 +5139,15 @@ async function openNewSessionModal() {
           </div>
         </div>
       </div>
+      <details id="nsm-context-section" style="margin-top:12px">
+        <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--text-secondary)">변경 설명 (선택)</summary>
+        <div style="margin-top:8px">
+          <textarea id="nsm-context-summary" placeholder="이 변경의 목적과 핵심 내용..."
+                    rows="3" style="width:100%;resize:vertical;font-size:13px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);box-sizing:border-box"></textarea>
+          <textarea id="nsm-context-decisions" placeholder="의도적 결정 (줄별 하나씩)"
+                    rows="2" style="width:100%;resize:vertical;font-size:13px;padding:8px;margin-top:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);box-sizing:border-box"></textarea>
+        </div>
+      </details>
       <button class="btn btn-primary" id="nsm-submit" onclick="submitNewSession(this)" style="align-self:flex-end" disabled>생성</button>
     </div>
   </div>`;
@@ -5329,14 +5291,33 @@ async function submitNewSession(btn) {
     btn.disabled = false;
     return;
   }
+
+  const contextSummary = (document.getElementById('nsm-context-summary')?.value || '').trim();
+  const contextDecisions = (document.getElementById('nsm-context-decisions')?.value || '').trim();
+
+  const body = { repo_path: repoPath, base, head, preset_ids: presetIds };
+
+  if (contextSummary || contextDecisions) {
+    body.implementation_context = {
+      summary: contextSummary || '',
+      decisions: contextDecisions ? contextDecisions.split('\n').filter(Boolean) : [],
+    };
+  }
+
   try {
+    // 1) Create session
     const r = await fetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo_path: repoPath, base, head, preset_ids: presetIds }),
+      body: JSON.stringify(body),
     });
     const data = await r.json();
     if (!r.ok) { alert(data.detail || '세션 생성 실패'); btn.disabled = false; return; }
+
+    // 2) Start review
+    const startR = await fetch(`/api/sessions/${data.session_id}/start`, { method: 'POST' });
+    if (!startR.ok) { alert('리뷰 시작 실패'); }
+
     _saveRecentRepo(repoPath);
     btn.closest('.report-overlay').remove();
     await fetchSessions();
@@ -5355,6 +5336,10 @@ async function init() {
   await fetchSessions();
   renderSessionTabs();
 
+  // Deep link: URL에서 세션/이슈 파싱
+  const urlState = router.parse();
+  const urlSessionValid = urlState.sessionId && state.sessions.some(s => s.session_id === urlState.sessionId);
+
   let currentSessionId = null;
   try {
     const r = await fetch('/api/sessions/current/status');
@@ -5367,27 +5352,46 @@ async function init() {
     }
   } catch(e) {}
 
-  const savedSessionId = savedUI?.session_id || '';
-  const hasSavedSession = !!savedSessionId && state.sessions.some(s => s.session_id === savedSessionId);
-  const targetSessionId = hasSavedSession ? savedSessionId : currentSessionId;
+  // URL 딥링크 우선 → localStorage → 서버 현재 세션
+  let targetSessionId;
+  if (urlSessionValid) {
+    targetSessionId = urlState.sessionId;
+  } else {
+    const savedSessionId = savedUI?.session_id || '';
+    const hasSavedSession = !!savedSessionId && state.sessions.some(s => s.session_id === savedSessionId);
+    targetSessionId = hasSavedSession ? savedSessionId : currentSessionId;
+  }
 
   if (targetSessionId && targetSessionId !== currentSessionId) {
     state.sessionId = currentSessionId || null;
     renderSessionTabs();
     await switchSession(targetSessionId);
-    return;
+  } else {
+    state.sessionId = targetSessionId || null;
+    state.humanAssistAccessKey = state.sessionId ? (_humanAssistKeyBySession[state.sessionId] || null) : null;
+    renderSessionTabs();
+    if (state.sessionId) {
+      connectSSE(state.sessionId);
+      await pollStatus();
+    } else {
+      updateStepIndicator();
+      startStatusPolling();
+    }
   }
 
-  state.sessionId = targetSessionId || null;
-  state.humanAssistAccessKey = state.sessionId ? (_humanAssistKeyBySession[state.sessionId] || null) : null;
-  renderSessionTabs();
-  if (state.sessionId) {
-    connectSSE(state.sessionId);
-    await pollStatus();
-  } else {
-    updateStepIndicator();
-    startStatusPolling();
+  // URL에서 이슈/뷰 모드 복원
+  if (urlSessionValid && state.sessionId === urlState.sessionId) {
+    if (urlState.issueId) {
+      const issueExists = state.issues.some(i => i.id === urlState.issueId);
+      if (issueExists) selectIssue(urlState.issueId);
+    }
+    if (urlState.opinionId) {
+      setTimeout(() => _scrollToOpinion(urlState.opinionId), 200);
+    }
   }
+
+  // 초기 URL 동기화
+  router.sync();
 }
 init();
 </script>
