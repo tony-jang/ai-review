@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from ai_review.models import ModelConfig
+
+ActivityCallback = Callable[[str, str], None]
 
 
 @dataclass
@@ -20,6 +22,9 @@ class TriggerResult:
 
 class TriggerEngine(abc.ABC):
     """Abstract base class for client trigger engines."""
+
+    on_activity: ActivityCallback | None = None
+    env_vars: dict[str, str] = {}
 
     @abc.abstractmethod
     async def create_session(self, model_id: str) -> str:

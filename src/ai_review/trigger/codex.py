@@ -1,17 +1,79 @@
-"""Codex CLI trigger engine — subprocess-based."""
+"""Codex CLI trigger engine — subprocess-based with JSONL streaming."""
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+import json
+import logging
+import os
 import re
+import shlex
+from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING
 import uuid
 
 from ai_review.trigger.base import TriggerEngine, TriggerResult
 
+_ARV_DIR = str(Path(__file__).resolve().parent.parent / "bin")
+
 if TYPE_CHECKING:
     from ai_review.models import ModelConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_codex_activity(command: str) -> tuple[str, str] | None:
+    """Parse a Codex command_execution command string into (action, target).
+
+    Codex wraps commands as ``/bin/zsh -lc "..."``; we extract the inner
+    command and map it to the same action labels used by ClaudeCodeTrigger.
+    """
+    # Unwrap shell wrapper: /bin/zsh -lc "inner command"
+    inner = command
+    try:
+        parts = shlex.split(command)
+        if len(parts) >= 3 and parts[-2] == "-lc":
+            inner = parts[-1]
+    except ValueError:
+        pass  # malformed quoting — use raw command
+
+    # Match known tool patterns
+    tokens = inner.split()
+    if not tokens:
+        return None
+    first = tokens[0].rsplit("/", 1)[-1]  # basename
+
+    if first in ("cat", "head", "tail"):
+        path = tokens[-1] if len(tokens) > 1 else ""
+        return ("Read", path)
+    if first in ("rg", "grep"):
+        # Best-effort pattern extraction: first non-flag positional argument,
+        # skipping values consumed by known option flags
+        _VALUE_FLAGS = {
+            "-t", "-g", "-m", "-e", "-f", "-A", "-B", "-C",
+            "--type", "--glob", "--max-count", "--regexp", "--file",
+            "--after-context", "--before-context", "--context",
+        }
+        pattern = ""
+        skip_next = False
+        for t in tokens[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if t in _VALUE_FLAGS:
+                skip_next = True
+                continue
+            if t.startswith("-"):
+                continue
+            pattern = t
+            break
+        return ("Grep", f"grep:{pattern}")
+    if first in ("find", "ls"):
+        path = tokens[1] if len(tokens) > 1 else "."
+        return ("Glob", f"glob:{path}")
+    # Default: treat as Bash
+    return ("Bash", f"bash:{inner[:80]}")
 
 
 class CodexTrigger(TriggerEngine):
@@ -35,7 +97,9 @@ class CodexTrigger(TriggerEngine):
     ) -> TriggerResult:
         """Run codex exec for first message, then codex exec resume for follow-ups."""
         session_id = self._sessions.get(model_id, "")
-        if self._looks_like_uuid(session_id):
+        is_resume = self._looks_like_uuid(session_id)
+
+        if is_resume:
             args = [
                 "codex", "exec",
                 "--skip-git-repo-check",
@@ -57,42 +121,30 @@ class CodexTrigger(TriggerEngine):
             args.append(prompt)
 
         try:
+            env = dict(os.environ)
+            env.update(self.env_vars)
+            env["PATH"] = f"{_ARV_DIR}:{env.get('PATH', '')}"
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
+                limit=1024 * 1024,  # 1MB line buffer
             )
             self._procs.add(proc)
             try:
-                try:
-                    stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=self._timeout_seconds
-                    )
-                except asyncio.TimeoutError:
-                    with suppress(ProcessLookupError):
-                        proc.kill()
-                    with suppress(asyncio.TimeoutError, Exception):
-                        await asyncio.wait_for(
-                            proc.communicate(),
-                            timeout=self._close_wait_seconds,
-                        )
-                    return TriggerResult(
-                        success=False,
-                        error=f"codex CLI timed out after {int(self._timeout_seconds)}s",
-                        client_session_id=client_session_id,
-                    )
-
-                output = stdout.decode().strip()
-                error = stderr.decode().strip()
-                if proc.returncode == 0 and not self._looks_like_uuid(session_id):
-                    extracted = self._extract_session_id(output)
-                    if extracted:
-                        self._sessions[model_id] = extracted
-
+                return await asyncio.wait_for(
+                    self._read_stream(proc, client_session_id, model_id, is_resume),
+                    timeout=self._timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                with suppress(ProcessLookupError):
+                    proc.kill()
+                with suppress(asyncio.TimeoutError, Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=self._close_wait_seconds)
                 return TriggerResult(
-                    success=proc.returncode == 0,
-                    output=output,
-                    error=error,
+                    success=False,
+                    error=f"codex CLI timed out after {int(self._timeout_seconds)}s",
                     client_session_id=client_session_id,
                 )
             finally:
@@ -109,6 +161,67 @@ class CodexTrigger(TriggerEngine):
                 error=str(e),
                 client_session_id=client_session_id,
             )
+
+    async def _read_stream(
+        self,
+        proc: asyncio.subprocess.Process,
+        client_session_id: str,
+        model_id: str,
+        is_resume: bool,
+    ) -> TriggerResult:
+        """Parse JSONL output line by line, invoking on_activity for command_execution events."""
+        stderr_task = asyncio.create_task(self._drain_stderr(proc))
+        result_text = ""
+
+        async for raw_line in proc.stdout:
+            line = raw_line.decode().strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            event_type = event.get("type")
+            item = event.get("item", {})
+            item_type = item.get("type")
+
+            # Extract thread_id from thread.started (first prompt only)
+            if event_type == "thread.started" and not is_resume:
+                thread_id = event.get("thread_id", "")
+                if thread_id:
+                    self._sessions[model_id] = thread_id
+
+            # command_execution started → fire activity callback
+            if event_type == "item.started" and item_type == "command_execution":
+                command = item.get("command", "")
+                if command and self.on_activity:
+                    activity = _extract_codex_activity(command)
+                    if activity:
+                        try:
+                            self.on_activity(*activity)
+                        except Exception:
+                            pass  # Never break the stream for callback errors
+
+            # Capture last agent_message as result text
+            if event_type == "item.completed" and item_type == "agent_message":
+                result_text = item.get("text", "")
+
+        await proc.wait()
+        stderr_output = await stderr_task
+
+        return TriggerResult(
+            success=proc.returncode == 0,
+            output=result_text.strip() if isinstance(result_text, str) else str(result_text),
+            error=stderr_output.strip(),
+            client_session_id=client_session_id,
+        )
+
+    @staticmethod
+    async def _drain_stderr(proc: asyncio.subprocess.Process) -> str:
+        """Read stderr in the background to prevent pipe buffer deadlock."""
+        data = await proc.stderr.read()
+        return data.decode() if data else ""
 
     async def close(self) -> None:
         procs = list(self._procs)
@@ -143,13 +256,3 @@ class CodexTrigger(TriggerEngine):
     @staticmethod
     def _looks_like_uuid(value: str) -> bool:
         return bool(re.fullmatch(r"[0-9a-fA-F-]{32,36}", value or ""))
-
-    @staticmethod
-    def _extract_session_id(output: str) -> str:
-        m = re.search(r'"session_id"\s*:\s*"([0-9a-fA-F-]{32,36})"', output)
-        if m:
-            return m.group(1)
-        m = re.search(r"\b([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})\b", output)
-        if m:
-            return m.group(1)
-        return ""

@@ -872,6 +872,24 @@ class Orchestrator:
         times with exponential back-off.  ``CancelledError`` and
         ``TriggerResult(success=False)`` are **not** retried.
         """
+        def _on_activity(action: str, target: str) -> None:
+            self.manager.record_activity(session_id, model_id, action, target)
+
+        trigger.on_activity = _on_activity
+        trigger.env_vars = {
+            "ARV_BASE": f"{self.api_base_url}/api/sessions/{session_id}",
+            "ARV_KEY": self.manager.ensure_agent_access_key(session_id, model_id),
+            "ARV_MODEL": model_id,
+        }
+        try:
+            await self._fire_trigger_inner(session_id, trigger, client_session_id, model_id, prompt, model_config=model_config)
+        finally:
+            trigger.on_activity = None
+
+    async def _fire_trigger_inner(
+        self, session_id: str, trigger: TriggerEngine, client_session_id: str, model_id: str, prompt: str,
+        *, model_config: "ModelConfig | None" = None,
+    ) -> None:
         attempts = [0.0, *self._trigger_retry_delays]  # first attempt + retries
         last_exc: Exception | None = None
 

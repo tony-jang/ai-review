@@ -46,7 +46,10 @@ class TestSendPrompt:
         assert "--approval-mode" in captured_args
         assert "default" in captured_args
         assert "--allowed-tools" in captured_args
-        assert "run_shell_command(curl)" in captured_args
+        tools_idx = captured_args.index("--allowed-tools")
+        tools_val = captured_args[tools_idx + 1]
+        assert "run_shell_command(arv)" in tools_val
+        assert "run_shell_command(curl)" in tools_val
         assert "-r" not in captured_args
         assert trigger._sessions["gemini1"] == "123e4567-e89b-12d3-a456-426614174000"
 
@@ -72,7 +75,10 @@ class TestSendPrompt:
         assert "--approval-mode" in captured_args
         assert "default" in captured_args
         assert "--allowed-tools" in captured_args
-        assert "run_shell_command(curl)" in captured_args
+        tools_idx = captured_args.index("--allowed-tools")
+        tools_val = captured_args[tools_idx + 1]
+        assert "run_shell_command(arv)" in tools_val
+        assert "run_shell_command(curl)" in tools_val
         assert "follow up" in captured_args
 
     @pytest.mark.asyncio

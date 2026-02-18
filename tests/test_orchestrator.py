@@ -2098,3 +2098,103 @@ class TestSafeFireAndForget:
 
         assert not any("test-cancel" in r.message for r in caplog.records if r.levelno >= logging.ERROR)
         await orch.close()
+
+
+class TestActivityCallbackWiring:
+    """Tests that _fire_trigger sets and clears on_activity on the trigger."""
+
+    @pytest.mark.asyncio
+    async def test_on_activity_set_and_cleared(self):
+        """_fire_trigger should set on_activity before send_prompt and clear it after."""
+        models = [ModelConfig(id="opus", client_type="claude-code")]
+        mgr, session = _make_manager_with_config(models)
+        session.agent_states["opus"] = AgentState(model_id="opus", status=AgentStatus.REVIEWING)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        callback_was_set = False
+
+        class SpyTrigger(TriggerEngine):
+            async def create_session(self, model_id: str) -> str:
+                return "spy-session"
+
+            async def send_prompt(self, client_session_id, model_id, prompt, model_config=None):
+                nonlocal callback_was_set
+                callback_was_set = self.on_activity is not None
+                return TriggerResult(success=True, output="ok", client_session_id=client_session_id)
+
+            async def close(self):
+                pass
+
+        trigger = SpyTrigger()
+        await orch._fire_trigger(session.id, trigger, "spy-session", "opus", "review")
+
+        assert callback_was_set is True
+        assert trigger.on_activity is None  # cleared after
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_on_activity_cleared_on_exception(self):
+        """on_activity should be cleared even when send_prompt raises."""
+        models = [ModelConfig(id="opus", client_type="claude-code")]
+        mgr, session = _make_manager_with_config(models)
+        session.agent_states["opus"] = AgentState(model_id="opus", status=AgentStatus.REVIEWING)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+        orch._trigger_retry_delays = []  # No retries
+
+        class ExplodingTrigger(TriggerEngine):
+            async def create_session(self, model_id: str) -> str:
+                return "exp-session"
+
+            async def send_prompt(self, client_session_id, model_id, prompt, model_config=None):
+                raise RuntimeError("boom")
+
+            async def close(self):
+                pass
+
+        trigger = ExplodingTrigger()
+        await orch._fire_trigger(session.id, trigger, "exp-session", "opus", "review")
+
+        assert trigger.on_activity is None  # cleared despite exception
+
+        await orch.close()
+
+    @pytest.mark.asyncio
+    async def test_on_activity_calls_record_activity(self):
+        """on_activity callback should call manager.record_activity."""
+        models = [ModelConfig(id="opus", client_type="claude-code")]
+        mgr, session = _make_manager_with_config(models)
+        session.agent_states["opus"] = AgentState(model_id="opus", status=AgentStatus.REVIEWING)
+        orch = Orchestrator(mgr, api_base_url="http://localhost:3000")
+
+        recorded = []
+        original_record = mgr.record_activity
+
+        def spy_record(sid, mid, action, target):
+            recorded.append((sid, mid, action, target))
+            return original_record(sid, mid, action, target)
+
+        mgr.record_activity = spy_record
+
+        class CallbackTrigger(TriggerEngine):
+            async def create_session(self, model_id: str) -> str:
+                return "cb-session"
+
+            async def send_prompt(self, client_session_id, model_id, prompt, model_config=None):
+                # Simulate the trigger calling on_activity
+                if self.on_activity:
+                    self.on_activity("Read", "/src/main.py")
+                    self.on_activity("Grep", "grep:TODO")
+                return TriggerResult(success=True, output="ok", client_session_id=client_session_id)
+
+            async def close(self):
+                pass
+
+        trigger = CallbackTrigger()
+        await orch._fire_trigger(session.id, trigger, "cb-session", "opus", "review")
+
+        assert len(recorded) == 2
+        assert recorded[0] == (session.id, "opus", "Read", "/src/main.py")
+        assert recorded[1] == (session.id, "opus", "Grep", "grep:TODO")
+
+        await orch.close()

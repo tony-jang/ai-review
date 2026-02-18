@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import uuid
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ai_review.trigger.base import TriggerEngine, TriggerResult
+
+_ARV_DIR = str(Path(__file__).resolve().parent.parent / "bin")
 
 if TYPE_CHECKING:
     from ai_review.models import ModelConfig
@@ -38,7 +42,7 @@ class GeminiTrigger(TriggerEngine):
             "--approval-mode",
             "default",
             "--allowed-tools",
-            "run_shell_command(curl)",
+            "run_shell_command(arv) run_shell_command(curl)",
         ]
         if model_config and model_config.model_id:
             base_args.extend(["--model", model_config.model_id])
@@ -63,10 +67,14 @@ class GeminiTrigger(TriggerEngine):
             ]
 
         try:
+            env = dict(os.environ)
+            env.update(self.env_vars)
+            env["PATH"] = f"{_ARV_DIR}:{env.get('PATH', '')}"
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             self._procs.add(proc)
             try:
