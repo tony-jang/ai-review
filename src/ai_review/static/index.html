@@ -140,7 +140,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .timeline-entry { font-size: 11px; color: var(--text-muted); padding: 2px 0; display: flex; gap: 6px; align-items: baseline; }
 .timeline-entry .timeline-time { flex-shrink: 0; font-size: 10px; font-family: 'SF Mono', Monaco, monospace; opacity: 0.7; min-width: 40px; }
 .timeline-entry .timeline-action { font-weight: 500; color: var(--text); }
-.timeline-entry .timeline-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-entry .timeline-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .file-agent-dots { display: inline-flex; gap: 2px; margin-left: 4px; vertical-align: middle; }
 .file-agent-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
 .activity-stats { font-size: 11px; color: var(--text-muted); padding: 0 4px; }
@@ -2681,6 +2681,23 @@ const ACTIVITY_LABELS = {
   view_diff: 'diff 확인',
   view_context: '컨텍스트 확인',
   view_index: '인덱스 확인',
+  Read: '파일 읽기',
+  Grep: '패턴 검색',
+  Glob: '파일 탐색',
+  Bash: '명령 실행',
+  arv_get_file: '파일 조회',
+  arv_get_index: '인덱스 조회',
+  arv_get_search: '코드 검색',
+  arv_get_tree: '구조 조회',
+  arv_get_context: '컨텍스트 조회',
+  arv_get_thread: '스레드 조회',
+  arv_get_delta: '델타 조회',
+  arv_get_confirmed: '확정 이슈 조회',
+  arv_report: '이슈 제출',
+  arv_summary: '리뷰 완료',
+  arv_opinion: '의견 제출',
+  arv_respond: '응답 제출',
+  arv_ping: '연결 테스트',
 };
 
 function _onAgentActivity(data) {
@@ -2704,6 +2721,9 @@ function _formatActivityTarget(action, target) {
   if (action === 'view_tree' && target.startsWith('tree:')) return target.slice(5);
   if (action === 'view_diff' && target.startsWith('diff:')) return target.slice(5);
   if (action === 'view_context' && target.startsWith('context:')) return target.slice(8);
+  if (action === 'Grep' && target.startsWith('grep:')) return target.slice(5);
+  if (action === 'Glob' && target.startsWith('glob:')) return target.slice(5);
+  if (action === 'Bash' && target.startsWith('bash:')) return target.slice(5);
   return target;
 }
 
@@ -2714,8 +2734,7 @@ function _updateAgentActivityUI(modelId) {
   if (!info || !info.latest) { el.textContent = ''; return; }
   const label = ACTIVITY_LABELS[info.latest.action] || info.latest.action;
   const target = _formatActivityTarget(info.latest.action, info.latest.target);
-  const short = target.length > 40 ? '...' + target.slice(-37) : target;
-  el.textContent = `${label}: ${short}`;
+  el.textContent = `${label}: ${target}`;
   el.title = `${label}: ${target}`;
   el.style.display = '';
 
@@ -2733,10 +2752,9 @@ function _renderActivityTimeline(modelId) {
   const rows = info.history.slice(0, 15).map(e => {
     const label = ACTIVITY_LABELS[e.action] || e.action;
     const target = _formatActivityTarget(e.action, e.target);
-    const short = target.length > 30 ? '...' + target.slice(-27) : target;
     const d = new Date(e.ts);
     const time = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
-    return `<div class="timeline-entry"><span class="timeline-time">${time}</span><span class="timeline-action">${esc(label)}</span><span class="timeline-target" title="${_escapeAttr(target)}">${esc(short)}</span></div>`;
+    return `<div class="timeline-entry"><span class="timeline-time">${time}</span><span class="timeline-action">${esc(label)}</span><span class="timeline-target" title="${_escapeAttr(target)}">${esc(target)}</span></div>`;
   }).join('');
   return `<div class="reviewer-timeline">${rows}</div>`;
 }
@@ -2747,7 +2765,7 @@ function _getFileAgentDots(filePath) {
   for (const [modelId, info] of Object.entries(_agentActivities)) {
     if (seen.has(modelId)) continue;
     const visited = info.history.some(e =>
-      (e.action === 'view_file' || e.action === 'view_diff') && e.target.includes(filePath)
+      (e.action === 'view_file' || e.action === 'view_diff' || e.action === 'Read') && e.target.includes(filePath)
     );
     if (visited) {
       seen.add(modelId);
@@ -2762,8 +2780,8 @@ function _getActivityStats() {
   for (const info of Object.values(_agentActivities)) {
     for (const e of info.history) {
       totalCalls++;
-      if (e.action === 'view_file' || e.action === 'view_diff') filesViewed.add(e.target);
-      if (e.action === 'search') searches++;
+      if (e.action === 'view_file' || e.action === 'view_diff' || e.action === 'Read') filesViewed.add(e.target);
+      if (e.action === 'search' || e.action === 'Grep') searches++;
     }
   }
   if (!totalCalls) return '';
@@ -4670,6 +4688,19 @@ async function pollStatus() {
       else {
         renderIssueList();
         if (state.detailViewMode !== 'issue' || !state.selectedIssue) renderIssueDetail();
+      }
+    }
+    // Restore agent activities from server on refresh (when client has no data)
+    if (d.agent_activities) {
+      for (const [modelId, acts] of Object.entries(d.agent_activities)) {
+        if (!_agentActivities[modelId] || !_agentActivities[modelId].history.length) {
+          if (acts.length) {
+            _agentActivities[modelId] = {
+              latest: acts[0],
+              history: acts.slice(0, MAX_ACTIVITY_HISTORY),
+            };
+          }
+        }
       }
     }
     renderAgentPanel();
