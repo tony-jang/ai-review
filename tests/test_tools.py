@@ -19,20 +19,20 @@ class TestManagerViaTools:
 
     @pytest.mark.asyncio
     async def test_start_review(self, manager):
-        result = await manager.start_review("main")
+        result = await manager.start_review("main", head="HEAD", repo_path="/tmp")
         assert "session_id" in result
         assert result["files_changed"] == 0
 
     @pytest.mark.asyncio
     async def test_get_review_context(self, manager):
-        start = await manager.start_review()
+        start = await manager.start_review(head="HEAD", repo_path="/tmp")
         ctx = manager.get_review_context(start["session_id"])
         assert "diff" in ctx
         assert "knowledge" in ctx
 
     @pytest.mark.asyncio
     async def test_submit_review(self, manager):
-        start = await manager.start_review()
+        start = await manager.start_review(head="HEAD", repo_path="/tmp")
         result = manager.submit_review(
             start["session_id"],
             "opus",
@@ -42,13 +42,13 @@ class TestManagerViaTools:
 
     @pytest.mark.asyncio
     async def test_get_session_status(self, manager):
-        start = await manager.start_review()
+        start = await manager.start_review(head="HEAD", repo_path="/tmp")
         status = manager.get_session_status(start["session_id"])
         assert status["status"] == "reviewing"
 
     @pytest.mark.asyncio
     async def test_get_final_report(self, manager):
-        start = await manager.start_review()
+        start = await manager.start_review(head="HEAD", repo_path="/tmp")
         manager.submit_review(
             start["session_id"],
             "opus",
@@ -61,7 +61,7 @@ class TestManagerViaTools:
     async def test_full_flow(self, manager):
         """E2E flow: start → review → create issues → opinion → report."""
         # Start
-        start = await manager.start_review()
+        start = await manager.start_review(head="HEAD", repo_path="/tmp")
         sid = start["session_id"]
 
         # Submit reviews from two models

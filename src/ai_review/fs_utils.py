@@ -84,7 +84,7 @@ def resolve_local_path(
             raise HTTPException(status_code=404, detail=str(e)) from e
     if not repo_root:
         current = manager.current_session
-        repo_root = (current.repo_path if current else "") or (manager.repo_path or "")
+        repo_root = current.repo_path if current else ""
 
     p = Path(target).expanduser()
     root = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd().resolve()

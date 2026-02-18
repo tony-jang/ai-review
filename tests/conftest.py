@@ -16,6 +16,12 @@ from ai_review.models import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_session_storage(tmp_path, monkeypatch):
+    """Prevent tests from writing sessions to the real project .ai-review/ directory."""
+    monkeypatch.chdir(tmp_path)
+
+
 @pytest.fixture
 def sample_diff_files() -> list[DiffFile]:
     return [

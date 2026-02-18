@@ -321,7 +321,6 @@ class TestGetReviewContext:
         assert idx["files"][0]["path"] == "src/main.py"
         assert idx["files"][0]["status"] == "modified"
         assert idx["files"][0]["hunks"][0]["new_start"] == 10
-        assert "available_apis" in idx
 
 
 class TestCreateIssues:
@@ -634,6 +633,33 @@ class TestSessionStatus:
         status = manager.get_session_status(sid)
         assert status["status"] == "reviewing"
         assert status["session_id"] == sid
+
+    @pytest.mark.asyncio
+    async def test_status_includes_agent_activities(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
+        sid = start["session_id"]
+
+        manager.record_activity(sid, "alpha", "Read", "/src/a.py")
+        manager.record_activity(sid, "alpha", "arv_report", "-n Bug -s high")
+        manager.record_activity(sid, "beta", "Grep", "pattern:TODO")
+
+        status = manager.get_session_status(sid)
+        activities = status["agent_activities"]
+        assert "alpha" in activities
+        assert "beta" in activities
+        assert len(activities["alpha"]) == 2
+        assert len(activities["beta"]) == 1
+        # Most recent first
+        assert activities["alpha"][0]["action"] == "arv_report"
+        assert activities["alpha"][1]["action"] == "Read"
+
+    @pytest.mark.asyncio
+    async def test_status_activities_empty_when_none(self, manager, tmp_path):
+        start = await manager.start_review(repo_path=str(tmp_path), head="test-branch")
+        sid = start["session_id"]
+
+        status = manager.get_session_status(sid)
+        assert status["agent_activities"] == {}
 
 
 class TestFinalReport:

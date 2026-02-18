@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ai_review.assist import (
@@ -31,6 +31,7 @@ from ai_review.models import AssistMessage, ModelConfig, SessionStatus
 from ai_review.orchestrator import Orchestrator
 from ai_review.session_manager import SessionManager
 from ai_review.tools import mcp, set_manager
+from ai_review.toon_response import toon_or_json
 from ai_review.trigger.base import TriggerEngine, TriggerResult
 from ai_review.trigger.cc import ClaudeCodeTrigger
 from ai_review.trigger.codex import CodexTrigger
@@ -40,9 +41,9 @@ from ai_review.trigger.opencode import OpenCodeTrigger
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
+def create_app(port: int = 3000) -> FastAPI:
     """Create the FastAPI application."""
-    manager = SessionManager(repo_path=repo_path)
+    manager = SessionManager()
     set_manager(manager)
 
     api_base_url = f"http://localhost:{port}"
@@ -54,10 +55,18 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     async def lifespan(app: FastAPI):
         async with mcp_http_app.lifespan(app):
             yield
-        await orchestrator.close()
+            await orchestrator.close()
+            await manager.flush()
 
     app = FastAPI(title="AI Review", version="0.1.0", lifespan=lifespan)
     app.state.manager = manager
+
+    @app.exception_handler(json.JSONDecodeError)
+    async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Invalid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})"},
+        )
 
     # ------------------------------------------------------------------
     # Helper: resolve session from current or raise 404
@@ -130,6 +139,40 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         return ClaudeCodeTrigger()
 
     def _build_connection_test_prompt(
+        callback_url: str,
+        test_token: str,
+        session_marker: str,
+        client_type: str,
+        provider: str,
+        model_id: str,
+    ) -> str:
+        if client_type == "opencode":
+            return _build_connection_test_prompt_curl(
+                callback_url, test_token, session_marker, client_type, provider, model_id,
+            )
+        return _build_connection_test_prompt_arv(
+            callback_url, test_token, session_marker, client_type,
+        )
+
+    def _build_connection_test_prompt_arv(
+        callback_url: str,
+        test_token: str,
+        session_marker: str,
+        client_type: str,
+    ) -> str:
+        parts = [
+            "연결 테스트입니다.",
+            "아래 명령을 그대로 수행하세요.",
+            "1) 단 한 번만 실행합니다.",
+            "2) 명령 인자를 수정하지 않습니다.",
+            "3) 실행 후 간단히 결과만 보고합니다.",
+            "",
+            "실행 명령:",
+            f"arv ping {callback_url} --token {test_token} --marker {session_marker} --client {client_type}",
+        ]
+        return "\n".join(parts)
+
+    def _build_connection_test_prompt_curl(
         callback_url: str,
         test_token: str,
         session_marker: str,
@@ -240,6 +283,12 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         timeout_seconds = max(3.0, min(timeout_seconds, 120.0))
 
         trigger = _create_connection_test_trigger(client_type, timeout_seconds)
+        if client_type != "opencode":
+            trigger.env_vars = {
+                "ARV_BASE": api_base_url,
+                "ARV_KEY": "connection-test",
+                "ARV_MODEL": model_id or f"test-{client_type}",
+            }
         test_token = uuid.uuid4().hex
         session_marker = uuid.uuid4().hex[:12]
         callback_url = f"{api_base_url}/api/agents/connection-test/callback/{test_token}"
@@ -406,20 +455,45 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     @app.post("/api/sessions")
     async def api_start_review(request: Request):
         body = await request.json() if await request.body() else {}
-        base = body.get("base", "main")
-        head = body.get("head")
+        base = body.get("base")
+        if not base:
+            raise HTTPException(status_code=400, detail="base is required")
         repo_path_param = body.get("repo_path")
+        if not repo_path_param:
+            raise HTTPException(status_code=400, detail="repo_path is required")
+        head = body.get("head")
+        if not head:
+            raise HTTPException(status_code=400, detail="head is required")
         preset_ids = body.get("preset_ids")
+        ic_data = body.get("implementation_context")
+        auto_start = body.get("auto_start", False)
         try:
-            result = await manager.start_review(base, head=head, repo_path=repo_path_param, preset_ids=preset_ids)
+            result = await manager.start_review(
+                base, head=head, repo_path=repo_path_param,
+                preset_ids=preset_ids, implementation_context=ic_data,
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        # Kick off automated review if models are configured
         session_id = result["session_id"]
-        await orchestrator.start(session_id)
+        if auto_start:
+            await orchestrator.start(session_id)
 
         return JSONResponse(result)
+
+    @app.post("/api/sessions/{session_id}/start")
+    async def api_start_session(session_id: str):
+        try:
+            session = manager.get_session(session_id)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        if session.status != SessionStatus.REVIEWING:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot start in {session.status.value} state",
+            )
+        await orchestrator.start(session_id)
+        return JSONResponse({"status": "started", "session_id": session_id})
 
     @app.delete("/api/sessions/{session_id}")
     async def api_delete_session(session_id: str):
@@ -508,7 +582,7 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     async def api_get_context(session_id: str, file: str | None = None, request: Request = None):
         try:
             _try_record_activity(request, session_id, "view_context", f"context:{file or 'all'}")
-            return JSONResponse(manager.get_review_context(session_id, file))
+            return toon_or_json(request, manager.get_review_context(session_id, file))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -527,7 +601,7 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     async def api_get_context_index(session_id: str, request: Request = None):
         try:
             _try_record_activity(request, session_id, "view_index", "index")
-            return JSONResponse(manager.get_context_index(session_id))
+            return toon_or_json(request, manager.get_context_index(session_id))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -552,28 +626,26 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    @app.get("/api/sessions/{session_id}/reviews")
-    async def api_get_reviews(session_id: str):
+    @app.post("/api/sessions/{session_id}/reviews/issues")
+    async def api_submit_review_issue(session_id: str, request: Request):
+        body = await request.json()
         try:
-            return JSONResponse(manager.get_all_reviews(session_id))
+            model_id = body.pop("model_id")
+            _require_model_access_key(session_id, model_id, request, body)
+            result = manager.submit_review_issue(session_id, model_id, body)
+            return JSONResponse(result)
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
-    @app.post("/api/sessions/{session_id}/overall-reviews")
-    async def api_submit_overall_review(session_id: str, request: Request):
+    @app.post("/api/sessions/{session_id}/reviews/complete")
+    async def api_complete_review(session_id: str, request: Request):
         body = await request.json()
         try:
             _require_model_access_key(session_id, body["model_id"], request, body)
-            result = manager.submit_overall_review(
-                session_id=session_id,
-                model_id=body["model_id"],
-                merge_decision=body.get("merge_decision", "needs_discussion"),
-                summary=body.get("summary", ""),
-                task_type=body.get("task_type", "review"),
-                turn=body.get("turn"),
-                highlights=body.get("highlights"),
-                blockers=body.get("blockers"),
-                recommendations=body.get("recommendations"),
+            result = manager.complete_review(
+                session_id, body["model_id"], body.get("summary", ""),
             )
             return JSONResponse(result)
         except KeyError as e:
@@ -581,10 +653,10 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    @app.get("/api/sessions/{session_id}/overall-reviews")
-    async def api_get_overall_reviews(session_id: str, turn: int | None = None):
+    @app.get("/api/sessions/{session_id}/reviews")
+    async def api_get_reviews(session_id: str):
         try:
-            return JSONResponse(manager.get_overall_reviews(session_id, turn=turn))
+            return JSONResponse(manager.get_all_reviews(session_id))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -621,9 +693,9 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(e))
 
     @app.get("/api/sessions/{session_id}/issues/{issue_id}/thread")
-    async def api_get_thread_by_session(session_id: str, issue_id: str):
+    async def api_get_thread_by_session(session_id: str, issue_id: str, request: Request = None):
         try:
-            return JSONResponse(manager.get_issue_thread(session_id, issue_id))
+            return toon_or_json(request, manager.get_issue_thread(session_id, issue_id))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -662,9 +734,9 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.get("/api/sessions/{session_id}/pending")
-    async def api_get_pending(session_id: str, model_id: str):
+    async def api_get_pending(session_id: str, model_id: str, request: Request = None):
         try:
-            return JSONResponse(manager.get_pending_issues(session_id, model_id))
+            return toon_or_json(request, manager.get_pending_issues(session_id, model_id))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -673,9 +745,9 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.get("/api/sessions/{session_id}/confirmed-issues")
-    async def api_get_confirmed_issues(session_id: str):
+    async def api_get_confirmed_issues(session_id: str, request: Request = None):
         try:
-            return JSONResponse(manager.get_confirmed_issues(session_id))
+            return toon_or_json(request, manager.get_confirmed_issues(session_id))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -725,9 +797,9 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(e))
 
     @app.get("/api/sessions/{session_id}/delta-context")
-    async def api_get_delta_context(session_id: str):
+    async def api_get_delta_context(session_id: str, request: Request = None):
         try:
-            return JSONResponse(manager.get_delta_context(session_id))
+            return toon_or_json(request, manager.get_delta_context(session_id))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -921,7 +993,7 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         try:
             target = f"{file_path}:{start or 1}-{end or 'end'}"
             _try_record_activity(request, session_id, "view_file", target)
-            return JSONResponse(manager.read_file(session_id, file_path, start, end))
+            return toon_or_json(request, manager.read_file(session_id, file_path, start, end))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
         except FileNotFoundError as e:
@@ -936,7 +1008,7 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
             raise HTTPException(status_code=400, detail="q (query) parameter is required")
         try:
             _try_record_activity(request, session_id, "search", f"search:{q.strip()}")
-            return JSONResponse(await manager.search_code(session_id, q.strip(), glob, max_results))
+            return toon_or_json(request, await manager.search_code(session_id, q.strip(), glob, max_results))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
@@ -945,7 +1017,7 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         """Browse project directory structure."""
         try:
             _try_record_activity(request, session_id, "view_tree", f"tree:{path or '.'}")
-            return JSONResponse(manager.get_tree(session_id, path, depth))
+            return toon_or_json(request, manager.get_tree(session_id, path, depth))
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
         except FileNotFoundError as e:
@@ -1117,6 +1189,20 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
 
+    @app.post("/api/sessions/{session_id}/issues/{issue_id}/dismiss")
+    async def api_dismiss_issue(session_id: str, issue_id: str, request: Request):
+        body = await request.json() if await request.body() else {}
+        try:
+            result = manager.dismiss_issue(
+                session_id, issue_id,
+                body.get("reasoning", ""), body.get("dismissed_by", ""),
+            )
+            return JSONResponse(result)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     # ------------------------------------------------------------------
     # Report & SSE
     # ------------------------------------------------------------------
@@ -1148,8 +1234,24 @@ def create_app(repo_path: str | None = None, port: int = 3000) -> FastAPI:
     # --- MCP mount ---
     app.mount("/mcp", mcp_http_app)
 
-    # --- Static files ---
+    # --- Static files + SPA catch-all ---
+    _SPA_ROUTE_RE = __import__("re").compile(
+        r"^(?:[0-9a-f]{12}(?:/issues/[0-9a-f]{12})?)?$"
+    )
+
     if STATIC_DIR.exists():
-        app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static-assets")
+
+        @app.get("/{full_path:path}")
+        async def spa_catch_all(full_path: str):
+            # Serve actual static files if they exist (CSS, JS, etc.)
+            if full_path:
+                candidate = STATIC_DIR / full_path
+                if candidate.is_file():
+                    return FileResponse(candidate)
+            # SPA routing: only for valid URL patterns (/, /{sid}, /{sid}/issues/{iid}, /{sid}/overall)
+            if _SPA_ROUTE_RE.match(full_path):
+                return FileResponse(STATIC_DIR / "index.html")
+            raise HTTPException(status_code=404, detail="Not found")
 
     return app

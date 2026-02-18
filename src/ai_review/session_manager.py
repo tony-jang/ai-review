@@ -588,12 +588,6 @@ class SessionManager:
             "base": session.base,
             "head": session.head,
             "files": files,
-            "available_apis": [
-                f"GET /api/sessions/{session.id}/files/{{path}}?start={{n}}&end={{n}}",
-                f"GET /api/sessions/{session.id}/search?q={{keyword}}&glob={{pattern}}",
-                f"GET /api/sessions/{session.id}/tree?path={{dir}}&depth={{n}}",
-                f"GET /api/sessions/{session.id}/context?file={{path}}",
-            ],
         }
 
     @staticmethod
@@ -713,6 +707,28 @@ class SessionManager:
 
         self.persist()
         return result
+
+    def submit_review_issue(self, session_id: str, model_id: str, issue: dict) -> dict:
+        """Submit a single review issue to the pending buffer."""
+        session = self.get_session(session_id)
+        if session.status not in (SessionStatus.REVIEWING, SessionStatus.VERIFYING):
+            raise ValueError(f"Cannot submit review issue in {session.status.value} state")
+
+        item = dict(issue)
+        item["description"] = self._ensure_issue_markdown(str(item.get("description", "")), "문제")
+        if "suggestion" in item:
+            item["suggestion"] = self._ensure_issue_markdown(str(item.get("suggestion", "")), "개선 제안")
+
+        session.pending_review_issues.setdefault(model_id, []).append(item)
+        self.persist()
+        return {"status": "accepted", "pending_count": len(session.pending_review_issues[model_id])}
+
+    def complete_review(self, session_id: str, model_id: str, summary: str = "") -> dict:
+        """Flush pending issues into a Review and finalize."""
+        session = self.get_session(session_id)
+        issues = session.pending_review_issues.pop(model_id, [])
+        self.persist()
+        return self.submit_review(session_id, model_id, issues, summary)
 
     def ensure_agent_access_key(self, session_id: str, model_id: str) -> str:
         """Get or create an access key for one configured agent."""
@@ -1134,7 +1150,26 @@ class SessionManager:
                 for f in session.diff
             ],
             "agents": self._get_agent_statuses(session),
+            "agent_activities": self._get_agent_activities_summary(session),
         }
+
+    def _get_agent_activities_summary(self, session: ReviewSession) -> dict[str, list[dict]]:
+        """Group recent activities by model_id for UI restoration on refresh."""
+        grouped: dict[str, list[dict]] = {}
+        for act in session.agent_activities:
+            grouped.setdefault(act.model_id, [])
+        # Collect up to MAX recent activities per model
+        _MAX = 50
+        for act in reversed(session.agent_activities):
+            bucket = grouped.setdefault(act.model_id, [])
+            if len(bucket) >= _MAX:
+                continue
+            bucket.append({
+                "action": act.action,
+                "target": act.target,
+                "ts": act.timestamp.isoformat(),
+            })
+        return grouped
 
     def _get_agent_statuses(self, session: ReviewSession) -> list[dict]:
         """Build agent status list for the UI."""

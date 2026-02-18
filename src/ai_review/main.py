@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
-
 import typer
 import uvicorn
 
@@ -13,36 +11,26 @@ app = typer.Typer(name="ai-review", help="Multi-model AI code review orchestrato
 @app.callback(invoke_without_command=True)
 def start(
     port: int = typer.Option(3000, help="Server port"),
-    base: str = typer.Option("main", help="Base branch for diff"),
-    repo: str = typer.Option(".", help="Repository path"),
 ) -> None:
     """Start the AI Review server."""
-    from pathlib import Path
-
-    # Suppress known deprecation warnings from uvicorn/websockets legacy adapter.
-    warnings.filterwarnings(
-        "ignore",
-        category=DeprecationWarning,
-        module=r"websockets(\.|$)",
-    )
-    warnings.filterwarnings(
-        "ignore",
-        category=DeprecationWarning,
-        module=r"uvicorn\.protocols\.websockets\.websockets_impl",
-    )
-
-    repo_path = str(Path(repo).resolve())
-
     from ai_review.server import create_app
 
-    fastapi_app = create_app(repo_path=repo_path, port=port)
+    fastapi_app = create_app(port=port)
 
     typer.echo(f"Starting AI Review on http://localhost:{port}")
-    typer.echo(f"  Repo: {repo_path}")
-    typer.echo(f"  Base: {base}")
-    typer.echo(f"  MCP:  http://localhost:{port}/mcp")
 
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=port, log_level="info")
+    log_config = uvicorn.config.LOGGING_CONFIG
+    log_config["formatters"]["default"]["fmt"] = "%(asctime)s %(levelprefix)s %(message)s"
+    log_config["formatters"]["default"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
+    log_config["formatters"]["access"]["fmt"] = '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+    log_config["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
+
+    uvicorn.run(
+        fastapi_app, host="0.0.0.0", port=port,
+        log_level="info", log_config=log_config,
+        ws="websockets-sansio",
+        timeout_graceful_shutdown=1,
+    )
 
 
 if __name__ == "__main__":

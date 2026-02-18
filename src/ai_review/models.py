@@ -283,6 +283,7 @@ class ReviewSession(BaseModel):
     client_sessions: dict[str, str] = Field(default_factory=dict)
     agent_states: dict[str, AgentState] = Field(default_factory=dict)
     agent_chats: dict[str, list[AgentChatMessage]] = Field(default_factory=dict)
+    pending_review_issues: dict[str, list[dict]] = Field(default_factory=dict)
     agent_activities: list[AgentActivity] = Field(default_factory=list)
     issue_responses: list[IssueResponse] = Field(default_factory=list)
     fix_commits: list[FixCommit] = Field(default_factory=list)
