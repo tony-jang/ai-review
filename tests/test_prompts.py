@@ -21,12 +21,12 @@ class TestBuildReviewPrompt:
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
         assert "sess1" in prompt
 
-    def test_contains_api_endpoints(self):
+    def test_contains_arv_commands(self):
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/api/sessions/sess1/index" in prompt
-        assert "/api/sessions/sess1/context" in prompt
-        assert "/api/sessions/sess1/reviews" in prompt
-        assert "/api/sessions/sess1/overall-reviews" in prompt
+        assert "arv get index" in prompt
+        assert "arv get context" in prompt
+        assert "arv report" in prompt
+        assert "arv summary" in prompt
         assert "line_start" in prompt
         assert "line_end" in prompt
 
@@ -61,31 +61,28 @@ class TestBuildReviewPrompt:
         assert "Security Reviewer" in prompt
         assert "xss" in prompt
 
-    def test_includes_agent_key_header(self):
-        prompt = build_review_prompt("sess1", _mc("codex"), "http://localhost:3000", agent_key="k_test_123")
-        assert "X-Agent-Key: k_test_123" in prompt
-
-    def test_no_local_tools(self):
+    def test_direct_tool_usage(self):
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "Do NOT use local tools" in prompt
-        # Should not instruct to use git/sed/rg directly
-        assert "Use local tools" not in prompt
+        assert "Read, Grep, Glob" in prompt
+        assert "arv commands only for session data" in prompt
 
-    def test_contains_file_api(self):
+    def test_contains_arv_get_file(self):
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/files/" in prompt
+        assert "arv get file" in prompt
 
-    def test_contains_search_api(self):
+    def test_contains_arv_get_search(self):
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/search?" in prompt
+        assert "arv get search" in prompt
 
-    def test_contains_tree_api(self):
+    def test_contains_arv_get_tree(self):
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/tree?" in prompt
+        assert "arv get tree" in prompt
 
-    def test_agent_key_for_get_requests(self):
+    def test_no_curl_commands_in_prompt(self):
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000", agent_key="k1")
-        assert "both GET and POST" in prompt
+        # "curl" may appear in "Do NOT use curl" warning, but not as an instruction to run
+        assert "curl -" not in prompt
+        assert "curl " not in prompt.replace("Do NOT use curl", "")
 
     def test_includes_implementation_context(self):
         ic = {
@@ -131,21 +128,18 @@ class TestBuildDeliberationPrompt:
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
         assert "sess1" in prompt
 
-    def test_contains_api_endpoints(self):
+    def test_contains_arv_commands(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
-        assert "/api/sessions/sess1/issues/" in prompt
-        assert "/thread" in prompt
-        assert "/opinions" in prompt
-        assert "/api/sessions/sess1/overall-reviews" in prompt
+        assert "arv get thread" in prompt
+        assert "arv opinion" in prompt
 
     def test_contains_turn_for_deliberation(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000", turn=2)
         assert "Current deliberation turn: 2" in prompt
-        assert '"turn":2' in prompt
 
-    def test_includes_agent_key_header(self):
+    def test_no_curl_commands_in_deliberation(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000", turn=1, agent_key="k_test_456")
-        assert "X-Agent-Key: k_test_456" in prompt
+        assert "curl -" not in prompt
 
     def test_contains_action_options(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
@@ -178,17 +172,14 @@ class TestBuildDeliberationPrompt:
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
         assert "## System Instructions" not in prompt
 
-    def test_no_local_tools(self):
+    def test_direct_tool_usage(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
-        assert "Do NOT use local tools" in prompt
+        assert "Read, Grep, Glob" in prompt
+        assert "arv commands only for session data" in prompt
 
-    def test_uses_session_scoped_thread_url(self):
+    def test_file_content_available(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
-        assert "/api/sessions/sess1/issues/" in prompt
-
-    def test_file_content_api_available(self):
-        prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
-        assert "/files/" in prompt
+        assert "arv get file" in prompt
 
     def test_confidence_guidance_included(self):
         prompt = build_deliberation_prompt("sess1", _mc("gpt"), ["iss1"], "http://localhost:3000")
@@ -206,13 +197,13 @@ class TestBuildAgentResponsePrompt:
         prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
         assert "sess1" in prompt
 
-    def test_contains_confirmed_issues_api(self):
+    def test_contains_arv_get_confirmed(self):
         prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/api/sessions/sess1/confirmed-issues" in prompt
+        assert "arv get confirmed" in prompt
 
-    def test_contains_respond_api(self):
+    def test_contains_arv_respond(self):
         prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/respond" in prompt
+        assert "arv respond" in prompt
 
     def test_contains_accept_dispute_partial(self):
         prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
@@ -220,25 +211,21 @@ class TestBuildAgentResponsePrompt:
         assert "dispute" in prompt
         assert "partial" in prompt
 
-    def test_contains_agent_key(self):
+    def test_no_curl_commands_in_agent_response(self):
         prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000", agent_key="k_test")
-        assert "X-Agent-Key: k_test" in prompt
+        assert "curl -" not in prompt
 
     def test_contains_redeliberation_guidance(self):
         prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
         assert "re-deliberation" in prompt
 
-    def test_contains_file_api(self):
+    def test_contains_arv_get_file(self):
         prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/files/" in prompt
+        assert "arv get file" in prompt
 
-    def test_contains_thread_api(self):
+    def test_contains_arv_get_thread(self):
         prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/thread" in prompt
-
-    def test_no_local_tools(self):
-        prompt = build_agent_response_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "Do NOT use local tools" in prompt
+        assert "arv get thread" in prompt
 
 
 class TestBuildVerificationPrompt:
@@ -250,39 +237,34 @@ class TestBuildVerificationPrompt:
         prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
         assert "sess1" in prompt
 
-    def test_contains_delta_context_api(self):
+    def test_contains_arv_get_delta(self):
         prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/api/sessions/sess1/delta-context" in prompt
+        assert "arv get delta" in prompt
 
-    def test_contains_opinions_api(self):
+    def test_contains_arv_opinion(self):
         prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/opinions" in prompt
+        assert "arv opinion" in prompt
 
-    def test_contains_reviews_api(self):
+    def test_contains_arv_report(self):
         prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/api/sessions/sess1/reviews" in prompt
-
-    def test_contains_overall_reviews_api(self):
-        prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/api/sessions/sess1/overall-reviews" in prompt
-        assert '"task_type":"verification"' in prompt
+        assert "arv report" in prompt
 
     def test_contains_verification_round(self):
         prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000", verification_round=3)
         assert "Round 3" in prompt
-        assert '"turn":3' in prompt
 
-    def test_contains_agent_key(self):
+    def test_no_curl_commands_in_verification(self):
         prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000", agent_key="k_verify_123")
-        assert "X-Agent-Key: k_verify_123" in prompt
+        assert "curl -" not in prompt
 
-    def test_contains_file_api(self):
+    def test_contains_arv_get_file(self):
         prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "/files/" in prompt
+        assert "arv get file" in prompt
 
-    def test_no_local_tools(self):
+    def test_direct_tool_usage(self):
         prompt = build_verification_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "Do NOT use local tools" in prompt
+        assert "Read, Grep, Glob" in prompt
+        assert "arv commands only for session data" in prompt
 
     def test_system_prompt_included(self):
         mc = _mc(system_prompt="Focus on security regressions.")

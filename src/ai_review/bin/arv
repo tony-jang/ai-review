@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# arv — AI Review CLI
+# Simplifies REST API calls for LLM reviewers.
+# Requires: ARV_BASE, ARV_KEY, ARV_MODEL environment variables.
+
+: "${ARV_BASE:?ARV_BASE is required}"
+: "${ARV_KEY:?ARV_KEY is required}"
+: "${ARV_MODEL:?ARV_MODEL is required}"
+
+_auth=(-H "X-Agent-Key: $ARV_KEY")
+_json_ct=(-H "Content-Type: application/json")
+
+_build_json() {
+  python3 -c "
+import json, sys
+obj = {}
+for arg in sys.argv[1:]:
+    k, v = arg.split('=', 1)
+    if k.startswith('file:'):
+        obj[k[5:]] = open(v).read()
+    elif k.startswith('int:'):
+        obj[k[4:]] = int(v) if v else None
+    elif k.startswith('float:'):
+        obj[k[6:]] = float(v) if v else None
+    elif k.startswith('opt:') and not v:
+        pass
+    else:
+        obj[k] = v
+print(json.dumps(obj, ensure_ascii=False))
+" "$@"
+}
+
+_get()  { curl -sf "${_auth[@]}" "$ARV_BASE/$1"; }
+_post() { curl -sf -X POST "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$ARV_BASE/$1"; }
+
+# --- GET commands ---
+cmd_get() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    index)
+      _get "index"
+      ;;
+    file)
+      local path="${1:?path required}"; shift
+      local range=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -r) range="$2"; shift 2 ;;
+          *)  shift ;;
+        esac
+      done
+      local url="files/$path"
+      if [[ -n "$range" ]]; then
+        local start="${range%%:*}"
+        local end="${range##*:}"
+        url="files/$path?start=$start&end=$end"
+      fi
+      _get "$url"
+      ;;
+    search)
+      local query="${1:?query required}"; shift
+      local glob_pat=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -g) glob_pat="$2"; shift 2 ;;
+          *)  shift ;;
+        esac
+      done
+      local url="search?q=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$query")"
+      if [[ -n "$glob_pat" ]]; then
+        url="$url&glob=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$glob_pat")"
+      fi
+      _get "$url"
+      ;;
+    tree)
+      local path="${1:-}"; shift || true
+      local depth=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          -d) depth="$2"; shift 2 ;;
+          *)  shift ;;
+        esac
+      done
+      local url="tree"
+      local sep="?"
+      if [[ -n "$path" ]]; then
+        url="$url${sep}path=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$path")"
+        sep="&"
+      fi
+      if [[ -n "$depth" ]]; then
+        url="$url${sep}depth=$depth"
+      fi
+      _get "$url"
+      ;;
+    context)
+      local file="${1:?file path required}"
+      _get "context?file=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$file")"
+      ;;
+    thread)
+      local issue_id="${1:?issue_id required}"
+      _get "issues/$issue_id/thread"
+      ;;
+    delta)
+      _get "delta-context"
+      ;;
+    confirmed)
+      _get "confirmed-issues"
+      ;;
+    *)
+      echo "Usage: arv get {index|file|search|tree|context|thread|delta|confirmed}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# --- POST: report (submit single issue) ---
+cmd_report() {
+  local title="" severity="" file="" lines="" desc_file="" desc_text="" sugg_file="" sugg_text=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n)   title="$2"; shift 2 ;;
+      -s)   severity="$2"; shift 2 ;;
+      --file) file="$2"; shift 2 ;;
+      --lines) lines="$2"; shift 2 ;;
+      -f)   desc_file="$2"; shift 2 ;;
+      -b)   desc_text="$2"; shift 2 ;;
+      --sf) sugg_file="$2"; shift 2 ;;
+      --sb) sugg_text="$2"; shift 2 ;;
+      *)    shift ;;
+    esac
+  done
+  : "${title:?-n title required}"
+  : "${severity:?-s severity required}"
+  : "${file:?--file required}"
+
+  local args=("model_id=$ARV_MODEL" "title=$title" "severity=$severity" "file=$file")
+  if [[ -n "$lines" ]]; then
+    local line_start="${lines%%:*}"
+    local line_end="${lines##*:}"
+    args+=("int:line_start=$line_start" "int:line_end=$line_end")
+  fi
+  if [[ -n "$desc_file" ]]; then
+    args+=("file:description=$desc_file")
+  elif [[ -n "$desc_text" ]]; then
+    args+=("description=$desc_text")
+  fi
+  if [[ -n "$sugg_file" ]]; then
+    args+=("file:suggestion=$sugg_file")
+  elif [[ -n "$sugg_text" ]]; then
+    args+=("suggestion=$sugg_text")
+  fi
+
+  local json
+  json=$(_build_json "${args[@]}")
+  _post "reviews/issues" "$json"
+}
+
+# --- POST: summary (complete review) ---
+cmd_summary() {
+  local text="" file=""
+  if [[ "${1:-}" == "-f" ]]; then
+    file="$2"
+  else
+    text="${1:-}"
+  fi
+
+  local args=("model_id=$ARV_MODEL")
+  if [[ -n "$file" ]]; then
+    args+=("file:summary=$file")
+  else
+    args+=("summary=$text")
+  fi
+
+  local json
+  json=$(_build_json "${args[@]}")
+  _post "reviews/complete" "$json"
+}
+
+# --- POST: opinion ---
+cmd_opinion() {
+  local issue_id="${1:?issue_id required}"; shift
+  local action="" body_file="" body_text="" severity="" confidence=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -a) action="$2"; shift 2 ;;
+      -f) body_file="$2"; shift 2 ;;
+      -b) body_text="$2"; shift 2 ;;
+      -s) severity="$2"; shift 2 ;;
+      -c) confidence="$2"; shift 2 ;;
+      *)  shift ;;
+    esac
+  done
+  : "${action:?-a action required}"
+
+  local args=("model_id=$ARV_MODEL" "action=$action")
+  if [[ -n "$body_file" ]]; then
+    args+=("file:reasoning=$body_file")
+  elif [[ -n "$body_text" ]]; then
+    args+=("reasoning=$body_text")
+  fi
+  args+=("opt:suggested_severity=$severity")
+  if [[ -n "$confidence" ]]; then
+    args+=("float:confidence=$confidence")
+  fi
+
+  local json
+  json=$(_build_json "${args[@]}")
+  _post "issues/$issue_id/opinions" "$json"
+}
+
+# --- POST: respond ---
+cmd_respond() {
+  local issue_id="${1:?issue_id required}"; shift
+  local action="" body_file="" body_text=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -a) action="$2"; shift 2 ;;
+      -f) body_file="$2"; shift 2 ;;
+      -b) body_text="$2"; shift 2 ;;
+      *)  shift ;;
+    esac
+  done
+  : "${action:?-a action required}"
+
+  local args=("action=$action" "submitted_by=$ARV_MODEL")
+  if [[ -n "$body_file" ]]; then
+    args+=("file:reasoning=$body_file")
+  elif [[ -n "$body_text" ]]; then
+    args+=("reasoning=$body_text")
+  fi
+
+  local json
+  json=$(_build_json "${args[@]}")
+  _post "issues/$issue_id/respond" "$json"
+}
+
+# --- POST: ping (connection test callback) ---
+cmd_ping() {
+  local callback_url="${1:?callback_url required}"; shift
+  local test_token="" session_marker="" client_type=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --token)   test_token="$2"; shift 2 ;;
+      --marker)  session_marker="$2"; shift 2 ;;
+      --client)  client_type="$2"; shift 2 ;;
+      *)         shift ;;
+    esac
+  done
+  local json
+  json=$(_build_json \
+    "test_token=$test_token" \
+    "session_marker=$session_marker" \
+    "client_type=$client_type" \
+    "model_id=$ARV_MODEL" \
+    "message=ai-review connection test callback")
+  curl -sf -X POST "${_json_ct[@]}" -d "$json" "$callback_url"
+}
+
+# --- Main dispatch ---
+main_cmd="${1:-}"; shift || true
+case "$main_cmd" in
+  get)     cmd_get "$@" ;;
+  report)  cmd_report "$@" ;;
+  summary) cmd_summary "$@" ;;
+  opinion) cmd_opinion "$@" ;;
+  respond) cmd_respond "$@" ;;
+  ping)    cmd_ping "$@" ;;
+  *)
+    echo "Usage: arv {get|report|summary|opinion|respond|ping} ..." >&2
+    exit 1
+    ;;
+esac
