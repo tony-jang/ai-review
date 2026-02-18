@@ -10,9 +10,10 @@ TRANSITIONS: dict[SessionStatus, set[SessionStatus]] = {
     SessionStatus.COLLECTING: {SessionStatus.REVIEWING},
     SessionStatus.REVIEWING: {SessionStatus.DEDUP},
     SessionStatus.DEDUP: {SessionStatus.DELIBERATING},
-    SessionStatus.DELIBERATING: {SessionStatus.DELIBERATING, SessionStatus.AGENT_RESPONSE, SessionStatus.COMPLETE},
+    SessionStatus.DELIBERATING: {SessionStatus.DELIBERATING, SessionStatus.FIXING, SessionStatus.COMPLETE},
+    # AGENT_RESPONSE kept for backward compatibility (persisted sessions may be in this state)
     SessionStatus.AGENT_RESPONSE: {SessionStatus.DELIBERATING, SessionStatus.FIXING, SessionStatus.COMPLETE},
-    SessionStatus.FIXING: {SessionStatus.VERIFYING},
+    SessionStatus.FIXING: {SessionStatus.VERIFYING, SessionStatus.COMPLETE},
     SessionStatus.VERIFYING: {SessionStatus.FIXING, SessionStatus.COMPLETE},
     SessionStatus.COMPLETE: set(),
 }

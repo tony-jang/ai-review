@@ -22,11 +22,12 @@ class TestTransitions:
             (SessionStatus.REVIEWING, SessionStatus.DEDUP),
             (SessionStatus.DEDUP, SessionStatus.DELIBERATING),
             (SessionStatus.DELIBERATING, SessionStatus.COMPLETE),
-            (SessionStatus.DELIBERATING, SessionStatus.AGENT_RESPONSE),
+            (SessionStatus.DELIBERATING, SessionStatus.FIXING),
             (SessionStatus.AGENT_RESPONSE, SessionStatus.DELIBERATING),
             (SessionStatus.AGENT_RESPONSE, SessionStatus.FIXING),
             (SessionStatus.AGENT_RESPONSE, SessionStatus.COMPLETE),
             (SessionStatus.FIXING, SessionStatus.VERIFYING),
+            (SessionStatus.FIXING, SessionStatus.COMPLETE),
             (SessionStatus.VERIFYING, SessionStatus.FIXING),
             (SessionStatus.VERIFYING, SessionStatus.COMPLETE),
         ],
@@ -73,7 +74,7 @@ class TestInvalidTransitions:
             (SessionStatus.AGENT_RESPONSE, SessionStatus.REVIEWING),
             (SessionStatus.AGENT_RESPONSE, SessionStatus.IDLE),
             (SessionStatus.AGENT_RESPONSE, SessionStatus.DEDUP),
-            (SessionStatus.FIXING, SessionStatus.COMPLETE),
+            (SessionStatus.DELIBERATING, SessionStatus.AGENT_RESPONSE),
             (SessionStatus.FIXING, SessionStatus.DELIBERATING),
             (SessionStatus.VERIFYING, SessionStatus.DELIBERATING),
         ],
@@ -94,15 +95,20 @@ class TestInvalidTransitions:
                 transition(session, status)
 
     def test_lifecycle_with_agent_response(self):
+        """Backward compat: AGENT_RESPONSE → COMPLETE still works."""
+        session = ReviewSession(status=SessionStatus.AGENT_RESPONSE)
+        transition(session, SessionStatus.COMPLETE)
+        assert session.status == SessionStatus.COMPLETE
+
+    def test_lifecycle_deliberating_to_fixing(self):
+        """New flow: DELIBERATING → FIXING directly."""
         session = ReviewSession()
         transition(session, SessionStatus.COLLECTING)
         transition(session, SessionStatus.REVIEWING)
         transition(session, SessionStatus.DEDUP)
         transition(session, SessionStatus.DELIBERATING)
-        transition(session, SessionStatus.AGENT_RESPONSE)
-        assert session.status == SessionStatus.AGENT_RESPONSE
-        transition(session, SessionStatus.COMPLETE)
-        assert session.status == SessionStatus.COMPLETE
+        transition(session, SessionStatus.FIXING)
+        assert session.status == SessionStatus.FIXING
 
     def test_lifecycle_with_fixing_verifying(self):
         session = ReviewSession()
@@ -110,7 +116,6 @@ class TestInvalidTransitions:
         transition(session, SessionStatus.REVIEWING)
         transition(session, SessionStatus.DEDUP)
         transition(session, SessionStatus.DELIBERATING)
-        transition(session, SessionStatus.AGENT_RESPONSE)
         transition(session, SessionStatus.FIXING)
         assert session.status == SessionStatus.FIXING
         transition(session, SessionStatus.VERIFYING)
@@ -123,9 +128,16 @@ class TestInvalidTransitions:
         assert session.status == SessionStatus.COMPLETE
 
     def test_agent_response_to_deliberating_for_dispute(self):
+        """Backward compat: AGENT_RESPONSE → DELIBERATING for disputes."""
         session = ReviewSession(status=SessionStatus.AGENT_RESPONSE)
         transition(session, SessionStatus.DELIBERATING)
         assert session.status == SessionStatus.DELIBERATING
+
+    def test_agent_response_to_fixing_compat(self):
+        """Backward compat: AGENT_RESPONSE → FIXING still works."""
+        session = ReviewSession(status=SessionStatus.AGENT_RESPONSE)
+        transition(session, SessionStatus.FIXING)
+        assert session.status == SessionStatus.FIXING
 
     def test_deliberating_self_transition(self):
         session = ReviewSession(status=SessionStatus.DELIBERATING)
