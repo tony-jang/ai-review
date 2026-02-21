@@ -8,6 +8,26 @@ import pytest
 from ai_review.trigger.gemini import GeminiTrigger
 
 
+def _make_async_lines(lines: list[bytes]):
+    """Create an async iterator that yields lines."""
+    async def _iter():
+        for line in lines:
+            yield line
+    return _iter()
+
+
+def _make_proc(*, stdout_lines: list[bytes], stderr_lines: list[bytes], returncode: int = 0):
+    """Build a mock process with async-iterable stdout/stderr."""
+    proc = AsyncMock()
+    proc.stdout = _make_async_lines(stdout_lines)
+    proc.stderr = _make_async_lines(stderr_lines)
+    proc.returncode = returncode
+    proc.wait = AsyncMock(return_value=returncode)
+    proc.kill = Mock()
+    proc.communicate = AsyncMock(return_value=(b"", b""))
+    return proc
+
+
 class TestCreateSession:
     @pytest.mark.asyncio
     async def test_returns_session_id(self):
@@ -24,13 +44,13 @@ class TestSendPrompt:
         trigger = GeminiTrigger()
         captured_args = []
 
+        proc = _make_proc(
+            stdout_lines=[b'{"session_id":"123e4567-e89b-12d3-a456-426614174000","text":"ok"}\n'],
+            stderr_lines=[],
+        )
+
         async def fake_exec(*args, **kwargs):
             captured_args.extend(args)
-            proc = AsyncMock()
-            proc.communicate = AsyncMock(
-                return_value=(b'{"session_id":"123e4567-e89b-12d3-a456-426614174000","text":"ok"}', b"")
-            )
-            proc.returncode = 0
             return proc
 
         with patch("ai_review.trigger.gemini.asyncio.create_subprocess_exec", side_effect=fake_exec):
@@ -44,12 +64,12 @@ class TestSendPrompt:
         assert "--output-format" in captured_args
         assert "json" in captured_args
         assert "--approval-mode" in captured_args
-        assert "default" in captured_args
+        assert "yolo" in captured_args
         assert "--allowed-tools" in captured_args
         tools_idx = captured_args.index("--allowed-tools")
-        tools_val = captured_args[tools_idx + 1]
-        assert "run_shell_command(arv)" in tools_val
-        assert "run_shell_command(curl)" in tools_val
+        assert captured_args[tools_idx + 1] == "run_shell_command(arv)"
+        assert captured_args[tools_idx + 2] == "--allowed-tools"
+        assert captured_args[tools_idx + 3] == "run_shell_command(curl)"
         assert "-r" not in captured_args
         assert trigger._sessions["gemini1"] == "123e4567-e89b-12d3-a456-426614174000"
 
@@ -59,11 +79,13 @@ class TestSendPrompt:
         trigger._sessions["gemini1"] = "123e4567-e89b-12d3-a456-426614174000"
         captured_args = []
 
+        proc = _make_proc(
+            stdout_lines=[b'{"text":"ok"}\n'],
+            stderr_lines=[],
+        )
+
         async def fake_exec(*args, **kwargs):
             captured_args.extend(args)
-            proc = AsyncMock()
-            proc.communicate = AsyncMock(return_value=(b'{"text":"ok"}', b""))
-            proc.returncode = 0
             return proc
 
         with patch("ai_review.trigger.gemini.asyncio.create_subprocess_exec", side_effect=fake_exec):
@@ -73,12 +95,12 @@ class TestSendPrompt:
         assert "-r" in captured_args
         assert "123e4567-e89b-12d3-a456-426614174000" in captured_args
         assert "--approval-mode" in captured_args
-        assert "default" in captured_args
+        assert "yolo" in captured_args
         assert "--allowed-tools" in captured_args
         tools_idx = captured_args.index("--allowed-tools")
-        tools_val = captured_args[tools_idx + 1]
-        assert "run_shell_command(arv)" in tools_val
-        assert "run_shell_command(curl)" in tools_val
+        assert captured_args[tools_idx + 1] == "run_shell_command(arv)"
+        assert captured_args[tools_idx + 2] == "--allowed-tools"
+        assert captured_args[tools_idx + 3] == "run_shell_command(curl)"
         assert "follow up" in captured_args
 
     @pytest.mark.asyncio
@@ -98,10 +120,13 @@ class TestSendPrompt:
     async def test_handles_process_failure(self):
         trigger = GeminiTrigger()
 
+        proc = _make_proc(
+            stdout_lines=[],
+            stderr_lines=[b"error occurred\n"],
+            returncode=1,
+        )
+
         async def fake_exec(*args, **kwargs):
-            proc = AsyncMock()
-            proc.communicate = AsyncMock(return_value=(b"", b"error occurred"))
-            proc.returncode = 1
             return proc
 
         with patch("ai_review.trigger.gemini.asyncio.create_subprocess_exec", side_effect=fake_exec):
@@ -113,10 +138,22 @@ class TestSendPrompt:
     @pytest.mark.asyncio
     async def test_times_out_and_kills_process(self):
         trigger = GeminiTrigger(timeout_seconds=0.01)
+
+        async def slow_stdout():
+            await asyncio.sleep(10)
+            yield b""
+
+        async def slow_stderr():
+            await asyncio.sleep(10)
+            yield b""
+
         proc = AsyncMock()
+        proc.stdout = slow_stdout()
+        proc.stderr = slow_stderr()
         proc.returncode = 1
-        proc.communicate = AsyncMock(side_effect=[asyncio.TimeoutError(), (b"", b"")])
         proc.kill = Mock()
+        proc.wait = AsyncMock(return_value=1)
+        proc.communicate = AsyncMock(return_value=(b"", b""))
 
         async def fake_exec(*args, **kwargs):
             return proc
@@ -126,6 +163,47 @@ class TestSendPrompt:
 
         assert result.success is False
         assert "timed out" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_fatal_stderr_kills_immediately(self):
+        """When a fatal pattern appears in stderr, the process is killed immediately."""
+        trigger = GeminiTrigger()
+
+        proc = _make_proc(
+            stdout_lines=[],
+            stderr_lines=[b"Error executing tool run_shell_command: Tool execution denied by policy.\n"],
+            returncode=1,
+        )
+
+        async def fake_exec(*args, **kwargs):
+            return proc
+
+        with patch("ai_review.trigger.gemini.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            result = await trigger.send_prompt("sess1", "gemini1", "test")
+
+        assert result.success is False
+        assert "Tool execution denied by policy" in result.error
+        proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fatal_resource_exhausted_kills_immediately(self):
+        """429 RESOURCE_EXHAUSTED triggers early fail."""
+        trigger = GeminiTrigger()
+
+        proc = _make_proc(
+            stdout_lines=[],
+            stderr_lines=[b"RESOURCE_EXHAUSTED: No capacity available for model\n"],
+            returncode=1,
+        )
+
+        async def fake_exec(*args, **kwargs):
+            return proc
+
+        with patch("ai_review.trigger.gemini.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            result = await trigger.send_prompt("sess1", "gemini1", "test")
+
+        assert result.success is False
+        assert "RESOURCE_EXHAUSTED" in result.error
         proc.kill.assert_called_once()
 
 

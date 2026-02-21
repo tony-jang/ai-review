@@ -27,7 +27,7 @@ for arg in sys.argv[1:]:
     elif k.startswith('opt:') and not v:
         pass
     else:
-        obj[k] = v
+        obj[k] = v.replace('\\\\n', '\n').replace('\\\\t', '\t')
 print(json.dumps(obj, ensure_ascii=False))
 " "$@"
 }

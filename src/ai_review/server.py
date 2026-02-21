@@ -55,7 +55,11 @@ def create_app(port: int = 3000) -> FastAPI:
     async def lifespan(app: FastAPI):
         async with mcp_http_app.lifespan(app):
             yield
-            await orchestrator.close()
+            manager.broker.disconnect_all()
+            try:
+                await asyncio.wait_for(orchestrator.close(), timeout=3)
+            except asyncio.TimeoutError:
+                pass
             await manager.flush()
 
     app = FastAPI(title="AI Review", version="0.1.0", lifespan=lifespan)
@@ -537,6 +541,19 @@ def create_app(port: int = 3000) -> FastAPI:
             updated = manager.update_agent_preset(preset_id, body)
             manager.broker.publish("agent_preset_changed", {"action": "updated", "preset_id": preset_id})
             return JSONResponse(updated)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/api/agent-presets/{preset_id}/rename")
+    async def api_rename_agent_preset(preset_id: str, request: Request):
+        body = await request.json()
+        new_id = body.get("new_id", "")
+        try:
+            renamed = manager.rename_agent_preset(preset_id, new_id)
+            manager.broker.publish("agent_preset_changed", {"action": "renamed", "preset_id": new_id, "old_preset_id": preset_id})
+            return JSONResponse(renamed)
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e))
         except (ValueError, TypeError) as e:
@@ -1236,7 +1253,7 @@ def create_app(port: int = 3000) -> FastAPI:
 
     # --- Static files + SPA catch-all ---
     _SPA_ROUTE_RE = __import__("re").compile(
-        r"^(?:[0-9a-f]{12}(?:/issues/[0-9a-f]{12})?)?$"
+        r"^(?:[0-9a-f]{12}(?:/(?:issues/[0-9a-f]{12}|changes))?)?$"
     )
 
     if STATIC_DIR.exists():

@@ -367,6 +367,18 @@ class TestExtractCodexActivity:
         result = _extract_codex_activity('/bin/zsh -lc "rg -n --type py TODO /src"')
         assert result == ("Grep", "grep:TODO")
 
+    def test_arv_get_tree(self):
+        result = _extract_codex_activity('/bin/zsh -lc "arv get tree src -d 3"')
+        assert result == ("arv_get_tree", "src -d 3")
+
+    def test_arv_report(self):
+        result = _extract_codex_activity('/bin/zsh -lc "arv report -n title -s high"')
+        assert result == ("arv_report", "-n title -s high")
+
+    def test_arv_get_file(self):
+        result = _extract_codex_activity('arv get file /src/main.py')
+        assert result == ("arv_get_file", "/src/main.py")
+
 
 class TestClose:
     @pytest.mark.asyncio

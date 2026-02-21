@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import uuid
 
 from ai_review.trigger.base import TriggerEngine, TriggerResult
+from ai_review.trigger.cc import _parse_arv_activity
 
 _ARV_DIR = str(Path(__file__).resolve().parent.parent / "bin")
 
@@ -72,6 +73,8 @@ def _extract_codex_activity(command: str) -> tuple[str, str] | None:
     if first in ("find", "ls"):
         path = tokens[1] if len(tokens) > 1 else "."
         return ("Glob", f"glob:{path}")
+    if first == "arv":
+        return _parse_arv_activity(inner)
     # Default: treat as Bash
     return ("Bash", f"bash:{inner[:80]}")
 
@@ -129,6 +132,7 @@ class CodexTrigger(TriggerEngine):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
                 limit=1024 * 1024,  # 1MB line buffer
             )
             self._procs.add(proc)

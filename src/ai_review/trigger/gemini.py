@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import logging
 import re
 import uuid
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 from ai_review.trigger.base import TriggerEngine, TriggerResult
 
@@ -17,6 +20,17 @@ _ARV_DIR = str(Path(__file__).resolve().parent.parent / "bin")
 
 if TYPE_CHECKING:
     from ai_review.models import ModelConfig
+
+
+_FATAL_PATTERNS = re.compile(
+    r"|".join([
+        r"Tool execution denied by policy",
+        r"RESOURCE_EXHAUSTED",
+        r"No capacity available",
+        r"exhausted your capacity",
+        r"Cannot use both a positional prompt and the --prompt",
+    ]),
+)
 
 
 class GeminiTrigger(TriggerEngine):
@@ -40,9 +54,9 @@ class GeminiTrigger(TriggerEngine):
         base_args = [
             "gemini",
             "--approval-mode",
-            "default",
-            "--allowed-tools",
-            "run_shell_command(arv) run_shell_command(curl)",
+            "yolo",
+            "--allowed-tools", "run_shell_command(arv)",
+            "--allowed-tools", "run_shell_command(curl)",
         ]
         if model_config and model_config.model_id:
             base_args.extend(["--model", model_config.model_id])
@@ -75,12 +89,14 @@ class GeminiTrigger(TriggerEngine):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
             self._procs.add(proc)
             try:
                 try:
-                    stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=self._timeout_seconds
+                    result = await asyncio.wait_for(
+                        self._read_with_early_fail(proc, client_session_id),
+                        timeout=self._timeout_seconds,
                     )
                 except asyncio.TimeoutError:
                     with suppress(ProcessLookupError):
@@ -96,19 +112,12 @@ class GeminiTrigger(TriggerEngine):
                         client_session_id=client_session_id,
                     )
 
-                output = stdout.decode().strip()
-                error = stderr.decode().strip()
-                if proc.returncode == 0 and not resume_session:
-                    extracted = self._extract_session_id(output)
+                if result.success and not resume_session:
+                    extracted = self._extract_session_id(result.output or "")
                     if extracted:
                         self._sessions[model_id] = extracted
 
-                return TriggerResult(
-                    success=proc.returncode == 0,
-                    output=output,
-                    error=error,
-                    client_session_id=client_session_id,
-                )
+                return result
             finally:
                 self._procs.discard(proc)
         except FileNotFoundError:
@@ -123,6 +132,59 @@ class GeminiTrigger(TriggerEngine):
                 error=str(e),
                 client_session_id=client_session_id,
             )
+
+    async def _read_with_early_fail(
+        self, proc: asyncio.subprocess.Process, client_session_id: str,
+    ) -> TriggerResult:
+        """Read stdout/stderr concurrently; kill immediately on fatal stderr patterns."""
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        fatal_error: str | None = None
+
+        async def _drain_stdout() -> None:
+            assert proc.stdout is not None
+            async for chunk in proc.stdout:
+                stdout_chunks.append(chunk)
+
+        async def _drain_stderr() -> None:
+            nonlocal fatal_error
+            assert proc.stderr is not None
+            async for line in proc.stderr:
+                stderr_chunks.append(line)
+                text = line.decode(errors="replace")
+                if _FATAL_PATTERNS.search(text):
+                    fatal_error = text.strip()
+                    logger.warning("gemini: fatal error detected, killing process: %s", fatal_error)
+                    with suppress(ProcessLookupError):
+                        proc.kill()
+                    return
+
+        stdout_task = asyncio.create_task(_drain_stdout())
+        stderr_task = asyncio.create_task(_drain_stderr())
+
+        await stderr_task
+        if fatal_error:
+            stdout_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await stdout_task
+            await proc.wait()
+            return TriggerResult(
+                success=False,
+                error=fatal_error,
+                client_session_id=client_session_id,
+            )
+
+        await stdout_task
+        await proc.wait()
+
+        output = b"".join(stdout_chunks).decode().strip()
+        error = b"".join(stderr_chunks).decode().strip()
+        return TriggerResult(
+            success=proc.returncode == 0,
+            output=output,
+            error=error,
+            client_session_id=client_session_id,
+        )
 
     async def close(self) -> None:
         procs = list(self._procs)
