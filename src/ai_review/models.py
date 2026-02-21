@@ -162,7 +162,7 @@ class ModelConfig(BaseModel):
     provider: str = ""
     model_id: str = ""
     test_endpoint: str = ""
-    role: str = ""
+    role: str = ""  # Deprecated: kept for backward compatibility, no longer used in prompts/UI
     description: str = ""
     color: str = ""
     avatar: str = ""

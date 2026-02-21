@@ -13,8 +13,9 @@ class TestBuildReviewPrompt:
         prompt = build_review_prompt("sess1", _mc("opus", "security"), "http://localhost:3000")
         assert "opus" in prompt
 
-    def test_contains_role(self):
-        prompt = build_review_prompt("sess1", _mc("opus", "security review"), "http://localhost:3000")
+    def test_review_focus_in_prompt(self):
+        mc = _mc("opus", review_focus=["security review"])
+        prompt = build_review_prompt("sess1", mc, "http://localhost:3000")
         assert "security review" in prompt
 
     def test_contains_session_id(self):
@@ -30,13 +31,14 @@ class TestBuildReviewPrompt:
         assert "line_start" in prompt
         assert "line_end" in prompt
 
-    def test_empty_role_omits_focus(self):
+    def test_empty_focus_omits_focus_areas(self):
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")
-        assert "review focus" not in prompt
+        assert "Focus areas:" not in prompt
 
-    def test_nonempty_role_includes_focus(self):
-        prompt = build_review_prompt("sess1", _mc("opus", "perf"), "http://localhost:3000")
-        assert "review focus" in prompt
+    def test_nonempty_focus_includes_focus_areas(self):
+        mc = _mc("opus", review_focus=["perf"])
+        prompt = build_review_prompt("sess1", mc, "http://localhost:3000")
+        assert "Focus areas:" in prompt
 
     def test_system_prompt_included(self):
         mc = _mc(system_prompt="Always check for SQL injection vulnerabilities.")
@@ -55,11 +57,11 @@ class TestBuildReviewPrompt:
         assert "auth" in prompt
         assert "injection" in prompt
 
-    def test_role_and_review_focus_together(self):
-        mc = _mc(role="Security Reviewer", review_focus=["xss", "csrf"])
+    def test_review_focus_multiple(self):
+        mc = _mc(review_focus=["xss", "csrf"])
         prompt = build_review_prompt("sess1", mc, "http://localhost:3000")
-        assert "Security Reviewer" in prompt
         assert "xss" in prompt
+        assert "csrf" in prompt
 
     def test_direct_tool_usage(self):
         prompt = build_review_prompt("sess1", _mc(), "http://localhost:3000")

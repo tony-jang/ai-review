@@ -151,9 +151,9 @@ class SessionManager:
             logger.exception("Failed to load persisted session state from %s", self._state_file)
 
     _DEFAULT_PRESETS: list[dict[str, str]] = [
-        {"id": "preset-claude-code", "client_type": "claude-code", "role": "general", "color": "#8B5CF6", "avatar": "🟣"},
-        {"id": "preset-codex", "client_type": "codex", "role": "general", "color": "#22C55E", "avatar": "🟢"},
-        {"id": "preset-gemini", "client_type": "gemini", "role": "general", "color": "#3B82F6", "avatar": "🔵"},
+        {"id": "preset-claude-code", "client_type": "claude-code", "color": "#8B5CF6", "avatar": "🟣"},
+        {"id": "preset-codex", "client_type": "codex", "color": "#22C55E", "avatar": "🟢"},
+        {"id": "preset-gemini", "client_type": "gemini", "color": "#3B82F6", "avatar": "🔵"},
     ]
 
     def _ensure_default_presets(self) -> None:
@@ -1151,6 +1151,20 @@ class SessionManager:
             ],
             "agents": self._get_agent_statuses(session),
             "agent_activities": self._get_agent_activities_summary(session),
+            "implementation_context": (
+                session.implementation_context.model_dump(mode="json")
+                if session.implementation_context else None
+            ),
+            "reviews": [
+                {
+                    "model_id": r.model_id,
+                    "summary": r.summary,
+                    "issue_count": len(r.issues),
+                    "turn": r.turn,
+                    "submitted_at": r.submitted_at.isoformat(),
+                }
+                for r in session.reviews
+            ],
         }
 
     def _get_agent_activities_summary(self, session: ReviewSession) -> dict[str, list[dict]]:
@@ -1193,7 +1207,6 @@ class SessionManager:
                 "prompt_preview": agent.prompt_preview,
                 "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
                 "last_reason": agent.last_reason,
-                "role": mc.role if mc else "",
                 "color": mc.color if mc else "",
                 "enabled": mc.enabled if mc else True,
                 "description": mc.description if mc else "",
@@ -1252,7 +1265,7 @@ class SessionManager:
             "model_id": model_id,
             "status": agent.status.value,
             "task_type": agent.task_type.value,
-            "role": next((m.role for m in session.config.models if m.id == model_id), ""),
+            "description": next((m.description for m in session.config.models if m.id == model_id), ""),
             "prompt_preview": agent.prompt_preview,
             "prompt_full": agent.prompt_full,
             "started_at": agent.started_at.isoformat() if agent.started_at else None,
@@ -1293,6 +1306,21 @@ class SessionManager:
         for key, value in updates.items():
             if hasattr(mc, key):
                 setattr(mc, key, value)
+        self.persist()
+        return mc.model_dump(mode="json")
+
+    def rename_agent_preset(self, preset_id: str, new_id: str) -> dict:
+        """Rename an agent preset by changing its ID."""
+        if preset_id not in self.agent_presets:
+            raise KeyError(f"Agent preset not found: {preset_id}")
+        new_id = new_id.strip()
+        if not new_id:
+            raise ValueError("New ID must not be empty")
+        if new_id in self.agent_presets:
+            raise ValueError(f"Agent preset already exists: {new_id}")
+        mc = self.agent_presets.pop(preset_id)
+        mc.id = new_id
+        self.agent_presets[new_id] = mc
         self.persist()
         return mc.model_dump(mode="json")
 

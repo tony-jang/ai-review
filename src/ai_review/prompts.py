@@ -66,7 +66,6 @@ def build_review_prompt(
 ) -> str:
     """Build a prompt that instructs an LLM to perform a code review via REST API."""
     model_id = model_config.id
-    role = model_config.role
     review_focus = model_config.review_focus
     system_prompt = model_config.system_prompt
     base = api_base_url
@@ -85,8 +84,6 @@ def build_review_prompt(
     if implementation_context:
         parts.extend(["", _render_implementation_context(implementation_context)])
 
-    if role:
-        parts.append(f"Your review focus: {role}")
     if review_focus:
         parts.append(f"Focus areas: {', '.join(review_focus)}")
 
