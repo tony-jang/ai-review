@@ -112,7 +112,7 @@ class TestSendPrompt:
         assert "--allowedTools" in captured_args
         tools_idx = captured_args.index("--allowedTools")
         tools_val = captured_args[tools_idx + 1]
-        assert "Bash(arv:*)" in tools_val
+        assert "Bash(arv *)" in tools_val
         assert "Write" in tools_val
         assert "Grep" in tools_val
         assert "Glob" in tools_val

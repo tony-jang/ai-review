@@ -85,7 +85,7 @@ class ClaudeCodeTrigger(TriggerEngine):
             "--print",
             "--output-format", "stream-json",
             "--verbose",
-            "--allowedTools", "Bash(arv:*) Write Read Grep Glob",
+            "--allowedTools", "Bash(arv *) Write Read Grep Glob",
         ]
         if model_config and model_config.model_id:
             args.extend(["--model", model_config.model_id])
@@ -100,6 +100,7 @@ class ClaudeCodeTrigger(TriggerEngine):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
                 limit=1024 * 1024,  # 1MB line buffer for large stream-json events
             )
             self._procs.add(proc)
