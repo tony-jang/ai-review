@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 ai-review = "ai_review.main:app"
+arv = "ai_review.arv_cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -3,14 +3,21 @@ set -euo pipefail
 
 # arv — AI Review CLI
 # Simplifies REST API calls for LLM reviewers.
-# Requires: ARV_BASE, ARV_KEY, ARV_MODEL environment variables.
+#
+# Environment variables (all have sensible defaults for local CLI usage):
+#   ARV_HOST  — server URL           (default: http://localhost:3000)
+#   ARV_BASE  — session API base URL (default: derived from ARV_HOST)
+#   ARV_KEY   — agent access key     (default: cli)
+#   ARV_MODEL — model identifier     (default: cli)
 
-: "${ARV_BASE:?ARV_BASE is required}"
-: "${ARV_KEY:?ARV_KEY is required}"
-: "${ARV_MODEL:?ARV_MODEL is required}"
+: "${ARV_HOST:=http://localhost:3000}"
+: "${ARV_BASE:=${ARV_HOST}/api/sessions/_}"
+: "${ARV_KEY:=cli}"
+: "${ARV_MODEL:=cli}"
 
 _auth=(-H "X-Agent-Key: $ARV_KEY")
 _json_ct=(-H "Content-Type: application/json")
+_API_ROOT="${ARV_BASE%/sessions/*}"
 
 _build_json() {
   python3 -c "
@@ -24,6 +31,10 @@ for arg in sys.argv[1:]:
         obj[k[4:]] = int(v) if v else None
     elif k.startswith('float:'):
         obj[k[6:]] = float(v) if v else None
+    elif k.startswith('bool:'):
+        obj[k[5:]] = v.lower() in ('true', '1', 'yes')
+    elif k.startswith('list:'):
+        obj[k[5:]] = [x.strip() for x in v.split(',') if x.strip()]
     elif k.startswith('opt:') and not v:
         pass
     else:
@@ -32,16 +43,39 @@ print(json.dumps(obj, ensure_ascii=False))
 " "$@"
 }
 
-_get()  { curl -sf "${_auth[@]}" "$ARV_BASE/$1"; }
-_post() { curl -sf -X POST "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$ARV_BASE/$1"; }
+_urlencode() { python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$1"; }
+_resolve_body() { if [[ "${1:-}" == "-" ]]; then cat; else printf '%s' "$1"; fi; }
 
-# --- GET commands ---
+# Session-scoped helpers
+_get()   { curl -sf "${_auth[@]}" "$ARV_BASE/$1"; }
+_post()  { curl -sf -X POST "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$ARV_BASE/$1"; }
+_post0() { curl -sf -X POST "${_auth[@]}" "$ARV_BASE/$1"; }
+_put()   { curl -sf -X PUT "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$ARV_BASE/$1"; }
+_del()   { curl -sf -X DELETE "${_auth[@]}" "$ARV_BASE/$1"; }
+_del0()  { curl -sf -X DELETE "${_auth[@]}" "$ARV_BASE"; }
+
+# Server-scoped helpers
+_sget()  { curl -sf "${_auth[@]}" "$_API_ROOT/$1"; }
+_spost() { curl -sf -X POST "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$_API_ROOT/$1"; }
+_sput()  { curl -sf -X PUT "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$_API_ROOT/$1"; }
+_sdel()  { curl -sf -X DELETE "${_auth[@]}" "$_API_ROOT/$1"; }
+
+# ============================================================
+# GET commands
+# ============================================================
 cmd_get() {
   local sub="${1:-}"; shift || true
   case "$sub" in
-    index)
-      _get "index"
-      ;;
+    # --- session-scoped reads ---
+    status)     _get "status" ;;
+    index)      _get "index" ;;
+    issues)     _get "issues" ;;
+    actionable) _get "actionable-issues" ;;
+    confirmed)  _get "confirmed-issues" ;;
+    pending)    _get "pending?model_id=$ARV_MODEL" ;;
+    report)     _get "report" ;;
+    delta)      _get "delta-context" ;;
+    agents)     _get "agents" ;;
     file)
       local path="${1:?path required}"; shift
       local range=""
@@ -53,9 +87,7 @@ cmd_get() {
       done
       local url="files/$path"
       if [[ -n "$range" ]]; then
-        local start="${range%%:*}"
-        local end="${range##*:}"
-        url="files/$path?start=$start&end=$end"
+        url="files/$path?start=${range%%:*}&end=${range##*:}"
       fi
       _get "$url"
       ;;
@@ -68,9 +100,9 @@ cmd_get() {
           *)  shift ;;
         esac
       done
-      local url="search?q=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$query")"
+      local url="search?q=$(_urlencode "$query")"
       if [[ -n "$glob_pat" ]]; then
-        url="$url&glob=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$glob_pat")"
+        url="$url&glob=$(_urlencode "$glob_pat")"
       fi
       _get "$url"
       ;;
@@ -86,8 +118,7 @@ cmd_get() {
       local url="tree"
       local sep="?"
       if [[ -n "$path" ]]; then
-        url="$url${sep}path=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$path")"
-        sep="&"
+        url="$url${sep}path=$(_urlencode "$path")"; sep="&"
       fi
       if [[ -n "$depth" ]]; then
         url="$url${sep}depth=$depth"
@@ -96,26 +127,40 @@ cmd_get() {
       ;;
     context)
       local file="${1:?file path required}"
-      _get "context?file=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$file")"
+      _get "context?file=$(_urlencode "$file")"
       ;;
     thread)
       local issue_id="${1:?issue_id required}"
       _get "issues/$issue_id/thread"
       ;;
-    delta)
-      _get "delta-context"
+    runtime)
+      local model_id="${1:?model_id required}"
+      _get "agents/$model_id/runtime"
       ;;
-    confirmed)
-      _get "confirmed-issues"
+    assist)
+      local issue_id="${1:?issue_id required}"
+      _get "issues/$issue_id/assist"
       ;;
+    chat)
+      local model_id="${1:?model_id required}"
+      _get "agents/$model_id/chat"
+      ;;
+    # --- server-scoped reads ---
+    sessions) _sget "sessions" ;;
+    presets)  _sget "agent-presets" ;;
+    models)   _sget "available-models" ;;
     *)
-      echo "Usage: arv get {index|file|search|tree|context|thread|delta|confirmed}" >&2
+      echo "Usage: arv get {status|index|issues|actionable|confirmed|pending|report|delta|" >&2
+      echo "               agents|file|search|tree|context|thread|runtime|assist|chat|" >&2
+      echo "               sessions|presets|models}" >&2
       return 1
       ;;
   esac
 }
 
-# --- POST: report (submit single issue) ---
+# ============================================================
+# POST: report (submit single issue)
+# ============================================================
 cmd_report() {
   local title="" severity="" file="" lines="" desc_file="" desc_text="" sugg_file="" sugg_text=""
   while [[ $# -gt 0 ]]; do
@@ -144,12 +189,12 @@ cmd_report() {
   if [[ -n "$desc_file" ]]; then
     args+=("file:description=$desc_file")
   elif [[ -n "$desc_text" ]]; then
-    args+=("description=$desc_text")
+    args+=("description=$(_resolve_body "$desc_text")")
   fi
   if [[ -n "$sugg_file" ]]; then
     args+=("file:suggestion=$sugg_file")
   elif [[ -n "$sugg_text" ]]; then
-    args+=("suggestion=$sugg_text")
+    args+=("suggestion=$(_resolve_body "$sugg_text")")
   fi
 
   local json
@@ -157,7 +202,9 @@ cmd_report() {
   _post "reviews/issues" "$json"
 }
 
-# --- POST: summary (complete review) ---
+# ============================================================
+# POST: summary (complete review)
+# ============================================================
 cmd_summary() {
   local text="" file=""
   if [[ "${1:-}" == "-f" ]]; then
@@ -178,7 +225,9 @@ cmd_summary() {
   _post "reviews/complete" "$json"
 }
 
-# --- POST: opinion ---
+# ============================================================
+# POST: opinion
+# ============================================================
 cmd_opinion() {
   local issue_id="${1:?issue_id required}"; shift
   local action="" body_file="" body_text="" severity="" confidence=""
@@ -198,7 +247,7 @@ cmd_opinion() {
   if [[ -n "$body_file" ]]; then
     args+=("file:reasoning=$body_file")
   elif [[ -n "$body_text" ]]; then
-    args+=("reasoning=$body_text")
+    args+=("reasoning=$(_resolve_body "$body_text")")
   fi
   args+=("opt:suggested_severity=$severity")
   if [[ -n "$confidence" ]]; then
@@ -210,7 +259,9 @@ cmd_opinion() {
   _post "issues/$issue_id/opinions" "$json"
 }
 
-# --- POST: respond ---
+# ============================================================
+# POST: respond (accept/dispute/partial)
+# ============================================================
 cmd_respond() {
   local issue_id="${1:?issue_id required}"; shift
   local action="" body_file="" body_text=""
@@ -228,7 +279,7 @@ cmd_respond() {
   if [[ -n "$body_file" ]]; then
     args+=("file:reasoning=$body_file")
   elif [[ -n "$body_text" ]]; then
-    args+=("reasoning=$body_text")
+    args+=("reasoning=$(_resolve_body "$body_text")")
   fi
 
   local json
@@ -236,10 +287,171 @@ cmd_respond() {
   _post "issues/$issue_id/respond" "$json"
 }
 
-# --- POST: ping (connection test callback) ---
+# ============================================================
+# POST: dismiss
+# ============================================================
+cmd_dismiss() {
+  local issue_id="${1:?issue_id required}"; shift
+  local body_file="" body_text=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f) body_file="$2"; shift 2 ;;
+      -b) body_text="$2"; shift 2 ;;
+      *)  shift ;;
+    esac
+  done
+
+  local args=("dismissed_by=$ARV_MODEL")
+  if [[ -n "$body_file" ]]; then
+    args+=("file:reasoning=$body_file")
+  elif [[ -n "$body_text" ]]; then
+    args+=("reasoning=$(_resolve_body "$body_text")")
+  fi
+
+  local json
+  json=$(_build_json "${args[@]}")
+  _post "issues/$issue_id/dismiss" "$json"
+}
+
+# ============================================================
+# POST: status (change issue progress status)
+# ============================================================
+cmd_status() {
+  local issue_id="${1:?issue_id required}"; shift
+  local new_status="${1:?status required (reported|wont_fix|fixed|completed)}"; shift
+  local body_text=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -b) body_text="$2"; shift 2 ;;
+      *)  shift ;;
+    esac
+  done
+  local args=("status=$new_status" "author=$ARV_MODEL")
+  if [[ -n "$body_text" ]]; then
+    args+=("reasoning=$body_text")
+  fi
+  local json
+  json=$(_build_json "${args[@]}")
+  _post "issues/$issue_id/status" "$json"
+}
+
+# ============================================================
+# POST: finish / start / activate (no body)
+# ============================================================
+cmd_finish()   { _post0 "finish"; }
+cmd_start()    { _post0 "start"; }
+cmd_activate() { _post0 "activate"; }
+
+# ============================================================
+# POST: fix-complete
+# ============================================================
+cmd_fix_complete() {
+  local commit="" issues=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -c) commit="$2"; shift 2 ;;
+      -i) issues="$2"; shift 2 ;;  # comma-separated
+      *)  shift ;;
+    esac
+  done
+  : "${commit:?-c commit_hash required}"
+
+  local args=("commit_hash=$commit" "submitted_by=$ARV_MODEL")
+  if [[ -n "$issues" ]]; then
+    args+=("list:issues_addressed=$issues")
+  fi
+
+  local json
+  json=$(_build_json "${args[@]}")
+  _post "fix-complete" "$json"
+}
+
+# ============================================================
+# POST: assist (ask AI for help on an issue)
+# ============================================================
+cmd_assist() {
+  local issue_id="${1:?issue_id required}"; shift
+  local body_text="" body_file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -b) body_text="$2"; shift 2 ;;
+      -f) body_file="$2"; shift 2 ;;
+      *)  shift ;;
+    esac
+  done
+
+  local args=()
+  if [[ -n "$body_file" ]]; then
+    args+=("file:message=$body_file")
+  elif [[ -n "$body_text" ]]; then
+    args+=("message=$(_resolve_body "$body_text")")
+  fi
+
+  local json
+  json=$(_build_json "${args[@]}")
+  _post "issues/$issue_id/assist" "$json"
+}
+
+# ============================================================
+# POST: chat (send message to agent)
+# ============================================================
+cmd_chat() {
+  local model_id="${1:?model_id required}"; shift
+  local body_text="" body_file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -b) body_text="$2"; shift 2 ;;
+      -f) body_file="$2"; shift 2 ;;
+      *)  shift ;;
+    esac
+  done
+
+  local args=()
+  if [[ -n "$body_file" ]]; then
+    args+=("file:message=$body_file")
+  elif [[ -n "$body_text" ]]; then
+    args+=("message=$(_resolve_body "$body_text")")
+  fi
+
+  local json
+  json=$(_build_json "${args[@]}")
+  _post "agents/$model_id/chat" "$json"
+}
+
+# ============================================================
+# POST: impl-context (submit implementation context)
+# ============================================================
+cmd_impl_context() {
+  local summary="" summary_file="" decisions=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -b) summary="$2"; shift 2 ;;
+      -f) summary_file="$2"; shift 2 ;;
+      -d) decisions+=("$2"); shift 2 ;;
+      *)  shift ;;
+    esac
+  done
+
+  python3 -c "
+import json, sys
+obj = {}
+if sys.argv[1]: obj['summary'] = sys.argv[1]
+elif sys.argv[2]: obj['summary'] = open(sys.argv[2]).read()
+decs = sys.argv[3:]
+if decs: obj['decisions'] = decs
+print(json.dumps(obj, ensure_ascii=False))
+" "$summary" "$summary_file" ${decisions[@]+"${decisions[@]}"} | {
+    read -r json
+    _post "implementation-context" "$json"
+  }
+}
+
+# ============================================================
+# POST: ping (connection test callback — defaults from env)
+# ============================================================
 cmd_ping() {
   local callback_url="${1:?callback_url required}"; shift
-  local test_token="" session_marker="" client_type=""
+  local test_token="$ARV_KEY" session_marker="" client_type="claude-code"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --token)   test_token="$2"; shift 2 ;;
@@ -251,24 +463,196 @@ cmd_ping() {
   local json
   json=$(_build_json \
     "test_token=$test_token" \
-    "session_marker=$session_marker" \
+    "opt:session_marker=$session_marker" \
     "client_type=$client_type" \
     "model_id=$ARV_MODEL" \
     "message=ai-review connection test callback")
   curl -sf -X POST "${_json_ct[@]}" -d "$json" "$callback_url"
 }
 
-# --- Main dispatch ---
+# ============================================================
+# session subcommands (server-scoped)
+# ============================================================
+cmd_session() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    list) _sget "sessions" ;;
+    create)
+      local base="" head="" repo="" presets="" auto_start="false" ic_summary="" ic_decisions=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --base)        base="$2"; shift 2 ;;
+          --head)        head="$2"; shift 2 ;;
+          --repo)        repo="$2"; shift 2 ;;
+          --presets)     presets="$2"; shift 2 ;;
+          --auto-start)  auto_start="true"; shift ;;
+          --context)     ic_summary="$2"; shift 2 ;;
+          --decision)    ic_decisions+=("$2"); shift 2 ;;
+          *)             shift ;;
+        esac
+      done
+      : "${base:?--base required}"
+      : "${head:?--head required}"
+      : "${repo:?--repo required}"
+      python3 -c "
+import json, sys
+obj = {'base': sys.argv[1], 'head': sys.argv[2], 'repo_path': sys.argv[3],
+       'auto_start': sys.argv[4] == 'true'}
+presets = sys.argv[5]
+if presets:
+    obj['preset_ids'] = [x.strip() for x in presets.split(',') if x.strip()]
+ic_summary = sys.argv[6]
+ic_decisions = sys.argv[7:]
+if ic_summary:
+    ic = {'summary': ic_summary}
+    if ic_decisions: ic['decisions'] = ic_decisions
+    obj['implementation_context'] = ic
+print(json.dumps(obj, ensure_ascii=False))
+" "$base" "$head" "$repo" "$auto_start" "$presets" "$ic_summary" ${ic_decisions[@]+"${ic_decisions[@]}"} | {
+        read -r json
+        _spost "sessions" "$json"
+      }
+      ;;
+    delete) _del0 ;;
+    *)
+      echo "Usage: arv session {list|create|delete}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# ============================================================
+# preset subcommands (server-scoped)
+# ============================================================
+cmd_preset() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    list) _sget "agent-presets" ;;
+    add)
+      local args=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --id)         args+=("id=$2"); shift 2 ;;
+          --client)     args+=("client_type=$2"); shift 2 ;;
+          --color)      args+=("color=$2"); shift 2 ;;
+          --desc)       args+=("description=$2"); shift 2 ;;
+          --strictness) args+=("strictness=$2"); shift 2 ;;
+          --avatar)     args+=("avatar=$2"); shift 2 ;;
+          *)            shift ;;
+        esac
+      done
+      local json
+      json=$(_build_json "${args[@]}")
+      _spost "agent-presets" "$json"
+      ;;
+    update)
+      local preset_id="${1:?preset_id required}"; shift
+      local args=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --*)
+            local key="${1#--}"
+            args+=("$key=$2"); shift 2 ;;
+          *)  shift ;;
+        esac
+      done
+      local json
+      json=$(_build_json "${args[@]}")
+      _sput "agent-presets/$preset_id" "$json"
+      ;;
+    delete)
+      local preset_id="${1:?preset_id required}"
+      _sdel "agent-presets/$preset_id"
+      ;;
+    *)
+      echo "Usage: arv preset {list|add|update|delete}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# ============================================================
+# agent subcommands (session-scoped)
+# ============================================================
+cmd_agent() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    list) _get "agents" ;;
+    add)
+      local args=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --id)     args+=("id=$2"); shift 2 ;;
+          --client) args+=("client_type=$2"); shift 2 ;;
+          --desc)   args+=("description=$2"); shift 2 ;;
+          *)        shift ;;
+        esac
+      done
+      local json
+      json=$(_build_json "${args[@]}")
+      _post "agents" "$json"
+      ;;
+    update)
+      local model_id="${1:?model_id required}"; shift
+      local args=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --*)
+            local key="${1#--}"
+            args+=("$key=$2"); shift 2 ;;
+          *)  shift ;;
+        esac
+      done
+      local json
+      json=$(_build_json "${args[@]}")
+      _put "agents/$model_id" "$json"
+      ;;
+    remove)
+      local model_id="${1:?model_id required}"
+      _del "agents/$model_id"
+      ;;
+    *)
+      echo "Usage: arv agent {list|add|update|remove}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# ============================================================
+# Main dispatch
+# ============================================================
 main_cmd="${1:-}"; shift || true
 case "$main_cmd" in
-  get)     cmd_get "$@" ;;
-  report)  cmd_report "$@" ;;
-  summary) cmd_summary "$@" ;;
-  opinion) cmd_opinion "$@" ;;
-  respond) cmd_respond "$@" ;;
-  ping)    cmd_ping "$@" ;;
+  get)          cmd_get "$@" ;;
+  report)       cmd_report "$@" ;;
+  summary)      cmd_summary "$@" ;;
+  opinion)      cmd_opinion "$@" ;;
+  respond)      cmd_respond "$@" ;;
+  dismiss)      cmd_dismiss "$@" ;;
+  status)       cmd_status "$@" ;;
+  finish)       cmd_finish ;;
+  start)        cmd_start ;;
+  activate)     cmd_activate ;;
+  fix-complete) cmd_fix_complete "$@" ;;
+  assist)       cmd_assist "$@" ;;
+  chat)         cmd_chat "$@" ;;
+  impl-context) cmd_impl_context "$@" ;;
+  ping)         cmd_ping "$@" ;;
+  session)      cmd_session "$@" ;;
+  preset)       cmd_preset "$@" ;;
+  agent)        cmd_agent "$@" ;;
   *)
-    echo "Usage: arv {get|report|summary|opinion|respond|ping} ..." >&2
+    echo "Usage: arv <command> [args]" >&2
+    echo "" >&2
+    echo "Read:    get {status|index|issues|actionable|confirmed|pending|report|delta|" >&2
+    echo "              agents|file|search|tree|context|thread|runtime|assist|chat|" >&2
+    echo "              sessions|presets|models}" >&2
+    echo "Review:  report | summary | opinion | respond" >&2
+    echo "Action:  dismiss | status | finish | start | activate | fix-complete | assist | chat" >&2
+    echo "Setup:   session {list|create|delete}" >&2
+    echo "         preset  {list|add|update|delete}" >&2
+    echo "         agent   {list|add|update|remove}" >&2
+    echo "Other:   impl-context | ping" >&2
     exit 1
     ;;
 esac
