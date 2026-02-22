@@ -9,7 +9,8 @@ import {
   _reviewerActionClass,
   _reviewerActionLabel,
   _shouldDeferIssueRender,
-  _getLatestReviewerOpinion
+  _getLatestReviewerOpinion,
+  progressBadgeHtml
 } from '../utils.js';
 import { ensureIssueDisplayNumbers } from './issue-list.js';
 
@@ -206,7 +207,6 @@ export function renderAgentPanel() {
       : (status === 'submitted' ? ' reviewer-status-submitted' : (status === 'failed' ? ' reviewer-status-failed' : ''));
     const issueEntries = _getReviewerIssueEntries(modelId);
     const raisedEntries = issueEntries.filter(e => e.raised);
-    const opinionEntries = issueEntries.filter(e => !e.raised);
     const renderEntryRow = (entry) => {
       const issue = entry.issue || {};
       const issueId = String(issue.id || '');
@@ -222,22 +222,16 @@ export function renderAgentPanel() {
       return `<div class="reviewer-issue-item" onclick="jumpToIssueFromReviewer(decodeURIComponent('${issueIdEncoded}'),decodeURIComponent('${modelIdForIssueEncoded}'),decodeURIComponent('${tsEncoded}'),decodeURIComponent('${actionEncoded}'))" title="${_escapeAttr(`${rowTitle} (${actionLabel})`)}">
         <div class="reviewer-issue-main">
           <span class="reviewer-issue-title">${esc(rowTitle)}</span>
-          <span class="reviewer-opinion-badge ${actionCls}">${esc(actionLabel)}</span>
+          ${progressBadgeHtml(issue.progress_status)}
         </div>
       </div>`;
     };
     let issuesHtml = '';
-    if (!issueEntries.length) {
-      issuesHtml = '<div class="reviewer-issues-empty">아직 남긴 의견이 없습니다.</div>';
+    if (!raisedEntries.length) {
+      issuesHtml = '<div class="reviewer-issues-empty">제기한 이슈가 없습니다.</div>';
     } else {
-      if (raisedEntries.length) {
-        issuesHtml += `<div class="reviewer-issues-group-label">제기한 이슈 <span class="reviewer-issues-group-count">${raisedEntries.length}</span></div>`;
-        issuesHtml += raisedEntries.map(renderEntryRow).join('');
-      }
-      if (opinionEntries.length) {
-        issuesHtml += `<div class="reviewer-issues-group-label">의견 남긴 이슈 <span class="reviewer-issues-group-count">${opinionEntries.length}</span></div>`;
-        issuesHtml += opinionEntries.map(renderEntryRow).join('');
-      }
+      issuesHtml += `<div class="reviewer-issues-group-label">제기한 이슈 <span class="reviewer-issues-group-count">${raisedEntries.length}</span></div>`;
+      issuesHtml += raisedEntries.map(renderEntryRow).join('');
     }
 
     return `<div class="reviewer-card${statusCls}${expanded ? ' expanded' : ''}">

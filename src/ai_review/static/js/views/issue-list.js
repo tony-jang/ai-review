@@ -1,5 +1,5 @@
 import state, { uiState, _uiSaveStateToStorage } from '../state.js';
-import { esc, _escapeAttr, getModelColor, _issueRangeLabel } from '../utils.js';
+import { esc, _escapeAttr, getModelColor, _issueRangeLabel, progressBadgeHtml } from '../utils.js';
 import { SEVERITY_COLORS, SEVERITY_ICONS, SEVERITY_LABELS } from '../constants.js';
 
 function sevLabel(s) { return SEVERITY_LABELS[s]||s; }
@@ -23,12 +23,14 @@ export function getFilteredIssues() {
   const severity = document.getElementById('filter-severity')?.value || '';
   const agent = document.getElementById('filter-agent')?.value || '';
   const consensus = document.getElementById('filter-consensus')?.value || '';
+  const progress = document.getElementById('filter-progress')?.value || '';
   const mineOnly = !!document.getElementById('filter-mine')?.checked;
   const coreOnly = !!document.getElementById('filter-core-only')?.checked;
 
   return state.issues.filter((issue) => {
     const sev = issue.final_severity || issue.severity;
     if (severity && sev !== severity) return false;
+    if (progress && (issue.progress_status || 'reported') !== progress) return false;
     if (agent) {
       const raised = issue.raised_by === agent;
       const inThread = (issue.thread || []).some(op => op.model_id === agent);
@@ -98,6 +100,7 @@ export function renderIssueList() {
         <div class="issue-title">#${displayNo} ${esc(issue.title)}</div>
         <div class="issue-meta">
           <span class="severity-badge" style="background:${color}20;color:${color}">${sevLabel(sev)}</span>
+          ${progressBadgeHtml(issue.progress_status)}
           <span>${cLabel}</span>
           ${rangeLabel
             ? `<span style="font-family:'SF Mono',Monaco,monospace;color:var(--text-muted)">L${esc(rangeLabel)}</span>`
@@ -117,7 +120,7 @@ export function renderIssueList() {
   _uiSaveStateToStorage();
 }
 
-export function selectIssue(id) {
+export function selectIssue(id, { push = true } = {}) {
   state.selectedIssue = id;
   state.selectedFileDiff = null;
   if (state.sessionId && id) uiState._uiSelectedIssueBySession[state.sessionId] = id;
@@ -125,10 +128,11 @@ export function selectIssue(id) {
   // Navigate to Changes tab and scroll to the issue's inline comment
   const issue = state.issues.find(i => i.id === id);
   if (issue && issue.file) {
-    window.scrollToFileInChanges(issue.file, issue.line_start || issue.line || 0, issue.id);
+    window.scrollToFileInChanges(issue.file, issue.line_start || issue.line || 0, issue.id, { push: false });
   } else {
-    window.switchMainTab('changes');
+    window.switchMainTab('changes', { push: false });
   }
+  if (push) window.router.push({ sessionId: state.sessionId, issueId: id });
 }
 
 export function renderIssueFilterOptions() {

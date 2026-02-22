@@ -87,7 +87,8 @@ function _renderSplitDiffTable(rows, issueRef, language, enableHighlight) {
     const rightContent = rightLine
       ? _renderDiffLineContent(rightLine.type === 'add' ? '+' : ' ', rightLine.text, language, enableHighlight)
       : '';
-    return `<tr${extraClass ? ` class="${extraClass}"` : ''}>
+    const trCls = [extraClass.trim(), marker.trim()].filter(Boolean).join(' ');
+    return `<tr${trCls ? ` class="${trCls}"` : ''}>
       <td class="diff-line-num diff-split-old-num ${leftCls}">${leftNum}</td>
       <td class="diff-line-content diff-split-old-content ${leftCls}">${leftContent}</td>
       <td class="diff-line-num diff-split-new-num ${rightCls}${marker}">${rightNum}</td>

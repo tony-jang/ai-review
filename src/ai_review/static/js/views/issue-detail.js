@@ -1,6 +1,6 @@
 import state, { renderGuard, shared, _uiSaveStateToStorage } from '../state.js';
-import { esc, _escapeAttr, getModelColor, renderMd, _getDiscussionOpinions, _issueRangeLabel, _shouldDeferIssueRender, _getInitialRaiseOpinion } from '../utils.js';
-import { SEVERITY_COLORS, SEVERITY_LABELS, ACTION_LABELS } from '../constants.js';
+import { esc, _escapeAttr, getModelColor, renderMd, _getDiscussionOpinions, _issueRangeLabel, _shouldDeferIssueRender, _getInitialRaiseOpinion, _isStatusChangeAction, progressBadgeHtml } from '../utils.js';
+import { SEVERITY_COLORS, SEVERITY_LABELS, ACTION_LABELS, PROGRESS_STATUS_LABELS } from '../constants.js';
 import { fetchDiff } from '../api.js';
 import { renderDiffWithFocus } from '../diff/renderer.js';
 import { _renderDiffStatsMeta } from '../diff/renderer.js';
@@ -76,6 +76,7 @@ export async function renderIssueDetail() {
     <div class="detail-file">${esc(fileLine)}</div>
     <div class="detail-badges">
       <span class="severity-badge" style="background:${sevColor}20;color:${sevColor}">${sevLabel(sev)}</span>
+      ${progressBadgeHtml(issue.progress_status)}
       <span style="font-size:12px;color:var(--text-muted)">제기: <span style="color:${getModelColor(issue.raised_by||'')}">${esc(issue.raised_by)}</span></span>
     </div>
   </div>`;
@@ -121,6 +122,16 @@ export async function renderIssueDetail() {
     if (isTimeline) {
       html += `<div class="thread-panel"><div class="thread-title">타임라인 (${timeline.length})</div>`;
       timeline.forEach((op, idx) => {
+        if (_isStatusChangeAction(op.action)) {
+          const mColor = getModelColor(op.model_id);
+          html += `<div class="status-change-log">
+            <span class="status-change-arrow">&rarr;</span>
+            <span class="model-dot" style="background:${mColor};width:8px;height:8px"></span>
+            <span>${esc(op.reasoning || '')}</span>
+            <span class="status-change-time">${op.timestamp ? esc(formatTs(op.timestamp)) : ''}</span>
+          </div>`;
+          return;
+        }
         const mColor = getModelColor(op.model_id);
         const actionClass = 'action-'+op.action;
         const rk = `tl-${issue.id}-${idx}`;
@@ -145,6 +156,16 @@ export async function renderIssueDetail() {
       <div class="section-body collapsed" id="issue-thread-${issue.id}">
       <div class="thread-panel">`;
     discussionThread.forEach((op, idx) => {
+      if (_isStatusChangeAction(op.action)) {
+        const mColor = getModelColor(op.model_id);
+        html += `<div class="status-change-log">
+          <span class="status-change-arrow">&rarr;</span>
+          <span class="model-dot" style="background:${mColor};width:8px;height:8px"></span>
+          <span>${esc(op.reasoning || '')}</span>
+          <span class="status-change-time">${op.timestamp ? esc(formatTs(op.timestamp)) : ''}</span>
+        </div>`;
+        return;
+      }
       const mColor = getModelColor(op.model_id);
       const actionClass = 'action-'+op.action;
       const rk = `th-${issue.id}-${idx}`;

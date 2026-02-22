@@ -1,4 +1,4 @@
-import { MODEL_COLORS, SEVERITY_LABELS, ACTION_LABELS } from './constants.js';
+import { MODEL_COLORS, SEVERITY_LABELS, ACTION_LABELS, PROGRESS_STATUS_LABELS, PROGRESS_STATUS_COLORS } from './constants.js';
 import state, { renderGuard } from './state.js';
 
 export function getModelColor(id) {
@@ -108,6 +108,7 @@ export function _normalizeReviewerAction(action) {
   if (key === 'fixrequired') key = 'fix_required';
   if (key === 'nofix') key = 'no_fix';
 
+  if (key.startsWith('status_change')) return 'status_change';
   if (key.startsWith('false_positive')) return 'false_positive';
   if (key.startsWith('withdraw')) return 'withdraw';
   if (key.startsWith('fix_required') || key.startsWith('agree')) return 'fix_required';
@@ -132,6 +133,7 @@ export function _reviewerActionClass(action) {
   if (key === 'no_fix') return 'reviewer-opinion-no-fix';
   if (key === 'false_positive') return 'reviewer-opinion-false-positive';
   if (key === 'withdraw') return 'reviewer-opinion-withdraw';
+  if (key === 'status_change') return 'reviewer-opinion-status-change';
   if (key === 'comment') return 'reviewer-opinion-comment';
   return 'reviewer-opinion-comment';
 }
@@ -143,6 +145,17 @@ export function _reviewerActionLabel(action) {
 
 export function _isRaiseAction(action) {
   return _normalizeReviewerAction(action) === 'raise';
+}
+
+export function _isStatusChangeAction(action) {
+  return _normalizeReviewerAction(action) === 'status_change';
+}
+
+export function progressBadgeHtml(status) {
+  if (!status) return '';
+  const label = PROGRESS_STATUS_LABELS[status] || status;
+  const color = PROGRESS_STATUS_COLORS[status] || '#6B7280';
+  return `<span class="progress-badge" style="background:${color}20;color:${color}">${esc(label)}</span>`;
 }
 
 export function _getInitialRaiseOpinion(issue) {

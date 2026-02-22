@@ -82,12 +82,12 @@ function _nsmRenderPresetList() {
     const checked = _nsmSelectedPresetIds.includes(p.id);
     const color = p.color || '#8B949E';
     const encoded = encodeURIComponent(p.id);
-    return `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid ${checked ? 'var(--accent)' : 'var(--border)'};border-radius:8px;cursor:pointer;background:${checked ? 'rgba(88,166,255,0.08)' : 'var(--bg)'}">
-      <input type="checkbox" ${checked ? 'checked' : ''} onchange="_nsmTogglePreset(decodeURIComponent('${encoded}'))" style="accent-color:var(--accent)">
-      <span style="width:10px;height:10px;border-radius:999px;background:${color};display:inline-block"></span>
-      <span style="font-size:12px;font-weight:600">${esc(p.id)}</span>
-      <span style="font-size:11px;color:var(--text-muted)">${esc(p.description || p.client_type || '')}</span>
-      <button class="btn" type="button" style="margin-left:auto;font-size:10px;padding:2px 6px" onclick="event.preventDefault();event.stopPropagation();_nsmOpenPresetManager(decodeURIComponent('${encoded}'))">수정</button>
+    return `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid ${checked ? 'var(--accent)' : 'var(--border)'};border-radius:8px;cursor:pointer;background:${checked ? 'rgba(88,166,255,0.08)' : 'var(--bg)'};min-width:0;overflow:hidden">
+      <input type="checkbox" ${checked ? 'checked' : ''} onchange="_nsmTogglePreset(decodeURIComponent('${encoded}'))" style="accent-color:var(--accent);flex-shrink:0">
+      <span style="width:10px;height:10px;border-radius:999px;background:${color};display:inline-block;flex-shrink:0"></span>
+      <span style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">${esc(p.id)}</span>
+      <span style="font-size:11px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">${esc(p.description || p.client_type || '')}</span>
+      <button class="btn" type="button" style="margin-left:auto;font-size:10px;padding:2px 6px;flex-shrink:0" onclick="event.preventDefault();event.stopPropagation();_nsmOpenPresetManager(decodeURIComponent('${encoded}'))">수정</button>
     </label>`;
   }).join('');
 }
@@ -206,7 +206,7 @@ export async function openNewSessionModal() {
             <button class="btn" type="button" style="font-size:11px;padding:3px 8px" onclick="_nsmRefreshPresets(true)">새로고침</button>
           </div>
         </div>
-        <div id="nsm-preset-list" style="display:grid;grid-template-columns:1fr 1fr;gap:8px"></div>
+        <div id="nsm-preset-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px"></div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:6px">선택한 프리셋의 리뷰어로 세션이 시작됩니다.</div>
       </div>
       ${recentRepos.length ? `<div><label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">최근 사용</label>${recentHtml}</div>` : ''}

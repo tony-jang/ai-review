@@ -14,6 +14,7 @@ export const router = {
       }
       if (parts.length >= 3 && parts[1] === 'issues' && this._ID_RE.test(parts[2])) {
         result.issueId = parts[2];
+        result.mainTab = 'changes';
       }
     }
     if (hash && hash.startsWith('#op-')) {
@@ -25,7 +26,9 @@ export const router = {
     const sid = opts.sessionId || state.sessionId;
     if (!sid) return '/';
     let path = `/${sid}`;
-    if (opts.mainTab === 'changes') {
+    if (opts.issueId) {
+      path += `/issues/${opts.issueId}`;
+    } else if (opts.mainTab === 'changes') {
       path += '/changes';
     }
     if (opts.opinionId) path += `#op-${opts.opinionId}`;
@@ -70,10 +73,20 @@ export function initRouter() {
       return;
     }
     if (parsed.sessionId !== state.sessionId) {
-      await window.switchSession(parsed.sessionId);
+      await window.switchSession(parsed.sessionId, { push: false });
     }
-    if (parsed.mainTab && parsed.mainTab !== state.mainTab) {
-      window.switchMainTab(parsed.mainTab);
+    if (parsed.issueId) {
+      const issueExists = state.issues.some(i => i.id === parsed.issueId);
+      if (issueExists) {
+        window.selectIssue(parsed.issueId, { push: false });
+      } else if (parsed.mainTab !== state.mainTab) {
+        window.switchMainTab(parsed.mainTab, { push: false });
+      }
+    } else {
+      if (state.selectedIssue) state.selectedIssue = null;
+      if (parsed.mainTab !== state.mainTab) {
+        window.switchMainTab(parsed.mainTab, { push: false });
+      }
     }
     if (parsed.opinionId) {
       setTimeout(() => _scrollToOpinion(parsed.opinionId), 100);

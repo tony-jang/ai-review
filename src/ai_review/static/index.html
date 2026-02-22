@@ -6,6 +6,11 @@
 <title>AI Review</title>
 <link rel="stylesheet" href="/vendor/starry-night-dark.css">
 <link rel="stylesheet" href="/css/main.css">
+<script>
+  // Restore theme before paint to prevent flash
+  const t = localStorage.getItem('ai-review-theme');
+  if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+</script>
 </head>
 <body>
 
@@ -18,6 +23,7 @@
     <span id="stat-issues">이슈 0개</span>
     <button class="btn btn-primary" id="btn-process" style="display:none" onclick="processReviews()">리뷰 처리</button>
     <button class="btn btn-finish" id="btn-finish" style="display:none" onclick="finishReview()">리뷰 완료</button>
+    <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="테마 전환"></button>
   </div>
 </div>
 

@@ -135,6 +135,7 @@ export function connectSSE(sid) {
   src.addEventListener('opinion_submitted', ()=>schedulePoll(50));
   src.addEventListener('agent_status', ()=>schedulePoll(50));
   src.addEventListener('issue_created', ()=>schedulePoll(50));
+  src.addEventListener('issue_status_changed', ()=>schedulePoll(50));
   src.addEventListener('agent_config_changed', ()=>schedulePoll(50));
   src.addEventListener('agent_activity', (ev) => {
     try {

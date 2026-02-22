@@ -40,6 +40,7 @@ Object.assign(window, {
   renderMainTabContent,
   selectIssue: issueListView.selectIssue,
   scrollToFileInChanges: conversationView.scrollToFileInChanges,
+  toggleConvIssue: conversationView.toggleConvIssue,
   scrollToChangesFile: changesView.scrollToChangesFile,
   renderChangesSidebar: changesView.renderChangesSidebar,
   onChangesFileFilterInput: changesView.onChangesFileFilterInput,
@@ -148,6 +149,9 @@ Object.assign(window, {
   // From router
   router,
 
+  // Theme
+  toggleTheme,
+
   // Orchestration functions from this file
   updateTabCounts,
   updateStepIndicator,
@@ -171,7 +175,8 @@ Object.assign(window, {
 
 // --- Orchestration functions ---
 
-export function switchMainTab(tab) {
+export function switchMainTab(tab, { force = false, push = true } = {}) {
+  const changed = state.mainTab !== tab;
   state.mainTab = tab;
   document.querySelectorAll('.main-tab').forEach(b => {
     b.classList.toggle('active', b.dataset.tab === tab);
@@ -181,8 +186,8 @@ export function switchMainTab(tab) {
   const showSidebar = state.files.length > 0;
   if (sidebar) sidebar.style.display = showSidebar ? '' : 'none';
   if (splitter) splitter.style.display = showSidebar ? '' : 'none';
-  renderMainTabContent();
-  router.sync();
+  if (changed || force) renderMainTabContent();
+  if (changed && push) router.push({ sessionId: state.sessionId, mainTab: tab });
 }
 
 export function renderMainTabContent() {
@@ -237,9 +242,32 @@ export function insertMention(mention) {
   el.setSelectionRange(pos, pos);
 }
 
+// --- Theme ---
+
+function toggleTheme() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  const next = isLight ? 'dark' : 'light';
+  if (next === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+  localStorage.setItem('ai-review-theme', next);
+  _syncThemeIcon();
+}
+
+function _syncThemeIcon() {
+  const btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  btn.textContent = isLight ? '\u263E' : '\u2600';
+  btn.title = isLight ? '\uB2E4\uD06C \uBAA8\uB4DC\uB85C \uC804\uD658' : '\uB77C\uC774\uD2B8 \uBAA8\uB4DC\uB85C \uC804\uD658';
+}
+
 // --- Initialization ---
 
 async function init() {
+  _syncThemeIcon();
   const savedUI = _uiRestoreStateFromStorage();
   diffHighlighter._ensureDiffHighlighter();
   filePanelView._loadFileOpeners();
@@ -275,7 +303,7 @@ async function init() {
   if (targetSessionId && targetSessionId !== currentSessionId) {
     state.sessionId = currentSessionId || null;
     sessionTabsView.renderSessionTabs();
-    await sessionTabsView.switchSession(targetSessionId);
+    await sessionTabsView.switchSession(targetSessionId, { push: false });
   } else {
     state.sessionId = targetSessionId || null;
     state.humanAssistAccessKey = state.sessionId ? (shared._humanAssistKeyBySession[state.sessionId] || null) : null;
@@ -292,11 +320,11 @@ async function init() {
   // URL에서 이슈/뷰 모드 복원
   if (urlSessionValid && state.sessionId === urlState.sessionId) {
     if (urlState.mainTab && urlState.mainTab !== state.mainTab) {
-      switchMainTab(urlState.mainTab);
+      switchMainTab(urlState.mainTab, { push: false });
     }
     if (urlState.issueId) {
       const issueExists = state.issues.some(i => i.id === urlState.issueId);
-      if (issueExists) issueListView.selectIssue(urlState.issueId);
+      if (issueExists) issueListView.selectIssue(urlState.issueId, { push: false });
     }
     if (urlState.opinionId) {
       setTimeout(() => _scrollToOpinion(urlState.opinionId), 200);

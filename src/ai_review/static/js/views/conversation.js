@@ -1,10 +1,150 @@
 import state from '../state.js';
-import { getModelColor, esc, _escapeAttr, renderMd, _reviewerActionClass, _getDiscussionOpinions, _issueRangeLabel, _issueLineRange } from '../utils.js';
+import { getModelColor, esc, _escapeAttr, renderMd, _reviewerActionClass, _getDiscussionOpinions, _issueRangeLabel, _issueLineRange, _isStatusChangeAction, progressBadgeHtml } from '../utils.js';
 import { SEVERITY_COLORS, SEVERITY_LABELS, ACTION_LABELS } from '../constants.js';
 import { fetchDiff, fetchFileLines } from '../api.js';
 import { renderDiffWithFocus, diffContainsLine, renderSourceLines } from '../diff/renderer.js';
-import { highlightIssueRange } from './changes.js';
+import { highlightIssueRange, changesReady } from './changes.js';
 import { ensureIssueDisplayNumbers } from './issue-list.js';
+
+/* ── Mini-diff cache ──────────────────────────────────── */
+const _miniDiffCache = new Map();  // issue.id → rendered HTML
+export function clearMiniDiffCache() { _miniDiffCache.clear(); }
+
+/* ── Helpers ───────────────────────────────────────────── */
+
+function _modelInitial(modelId) {
+  if (!modelId) return '?';
+  // Take first char of last segment (e.g. "gpt-4o" → "G", "claude-opus" → "C")
+  const parts = modelId.split(/[-_/]/);
+  return (parts[0] || '?')[0].toUpperCase();
+}
+
+function _findAgent(modelId) {
+  return state.agents.find(a => a.model_id === modelId);
+}
+
+function _renderAvatar(modelId, color, isLast) {
+  let html = '<div class="conv-tl-avatar-col">';
+  html += `<div class="conv-tl-avatar" style="background:${color}">${_modelInitial(modelId)}</div>`;
+  if (!isLast) html += '<div class="conv-tl-line"></div>';
+  html += '</div>';
+  return html;
+}
+
+function _renderCardHeader(modelId, color, agent, timeStr, extraHtml, { toggleIssueId } = {}) {
+  const onclick = toggleIssueId ? ` onclick="toggleConvIssue('${_escapeAttr(toggleIssueId)}')"` : '';
+  let html = `<div class="conv-tl-card-header"${onclick}>`;
+  html += `<span class="tl-agent-name" style="color:${color}">${esc(modelId)}</span>`;
+  html += '<span class="tl-bot-badge">Reviewer</span>';
+  if (agent?.role) html += `<span class="tl-role">${esc(agent.role)}</span>`;
+  if (extraHtml) html += `<span class="tl-extra">${extraHtml}</span>`;
+  html += `<span class="tl-time">${esc(timeStr)}</span>`;
+  if (toggleIssueId) html += '<span class="conv-issue-caret">▾</span>';
+  html += '</div>';
+  return html;
+}
+
+function _renderReviewSummaryCard(review, color, agent, isLast) {
+  const timeStr = new Date(review.submitted_at).toLocaleString();
+  const turnLabel = review.turn > 0 ? `Turn ${review.turn}` : '';
+  const turnHtml = turnLabel ? `<span style="font-size:11px;color:var(--text-muted)">${esc(turnLabel)}</span>` : '';
+
+  let html = '<div class="conv-tl-item">';
+  html += _renderAvatar(review.model_id, color, isLast);
+  html += '<div class="conv-tl-content">';
+  html += '<div class="conv-tl-card">';
+  html += _renderCardHeader(review.model_id, color, agent, timeStr, turnHtml);
+  html += '<div class="conv-tl-card-body">';
+  if (review.summary) {
+    html += `<div class="tl-summary">${renderMd(review.summary)}</div>`;
+  }
+  html += `<div class="tl-issue-count">${review.issue_count}개 이슈 제기</div>`;
+  html += '</div></div></div></div>';
+  return html;
+}
+
+function _renderIssueCard(issue, review, color, agent, isLast) {
+  const sev = issue.severity || 'low';
+  const sevColor = SEVERITY_COLORS[sev] || SEVERITY_COLORS.low;
+  const sevLabel = SEVERITY_LABELS[sev] || sev;
+  const range = _issueRangeLabel(issue);
+  const fileLabel = issue.file ? (issue.file.split('/').pop() + (range ? ':' + range : '')) : '';
+  const consensusIcon = issue.consensus ? ' ✅' : '';
+  const displayNo = state.issueNumberById[issue.id] || 0;
+  const timeStr = new Date(review.submitted_at).toLocaleString();
+
+  let html = '<div class="conv-tl-item">';
+  html += _renderAvatar(review.model_id, color, isLast);
+  html += '<div class="conv-tl-content">';
+  const resolved = issue.progress_status && issue.progress_status !== 'reported';
+  html += `<div class="conv-tl-card tl-issue-card${resolved ? ' conv-collapsed' : ''}" id="conv-card-${issue.id}" style="border-left-color:${sevColor}">`;
+  html += _renderCardHeader(review.model_id, color, agent, timeStr, progressBadgeHtml(issue.progress_status), { toggleIssueId: issue.id });
+  html += '<div class="conv-tl-card-body">';
+
+  // Issue head: severity + number + title + goto
+  html += '<div class="tl-issue-head">';
+  html += `<span class="tl-sev-badge" style="background:${sevColor}20;color:${sevColor}">${esc(sevLabel)}</span>`;
+  html += progressBadgeHtml(issue.progress_status);
+  html += `<span class="tl-issue-no">#${displayNo}</span>`;
+  html += `<span class="tl-issue-title">${esc(issue.title || issue.description?.slice(0, 80) || 'Untitled')}${consensusIcon}</span>`;
+  if (issue.file) html += `<button class="tl-goto-btn" title="Changes에서 보기" onclick="event.stopPropagation();scrollToFileInChanges('${_escapeAttr(issue.file || '')}', ${issue.line_start || issue.line || 0}, '${_escapeAttr(issue.id)}')">Changes →</button>`;
+  html += '</div>';
+
+  // File label
+  if (fileLabel) html += `<span class="tl-file-label" data-path="${_escapeAttr(issue.file)}" onclick="onFileTreeFileContextMenu(event, this)">${esc(fileLabel)}</span>`;
+
+  // Description
+  if (issue.description) {
+    html += `<div class="diff-inline-thread-desc">${renderMd(issue.description)}</div>`;
+  }
+
+  // Mini diff (cached or async)
+  if (issue.file) {
+    const cached = _miniDiffCache.get(issue.id) || '';
+    html += `<div class="conv-issue-card-diff" id="conv-diff-${issue.id}">${cached}</div>`;
+  }
+
+  // Thread opinions
+  const discussions = _getDiscussionOpinions(issue);
+  if (discussions.length) {
+    html += '<div class="diff-inline-thread-opinions">';
+    discussions.forEach(op => {
+      if (_isStatusChangeAction(op.action)) {
+        const opColor = getModelColor(op.model_id || '');
+        html += `<div class="status-change-log">
+          <span class="status-change-arrow">&rarr;</span>
+          <span class="model-dot" style="background:${opColor};width:8px;height:8px"></span>
+          <span>${esc(op.reasoning || '')}</span>
+        </div>`;
+        return;
+      }
+      const opColor = getModelColor(op.model_id || '');
+      const actionLabel = ACTION_LABELS[op.action] || op.action;
+      const actionClass = _reviewerActionClass(op.action);
+      html += '<div class="diff-inline-opinion-block">';
+      html += '<div class="diff-inline-opinion-header">';
+      html += `<div class="diff-inline-avatar diff-inline-avatar-sm" style="background:${opColor}">${_modelInitial(op.model_id)}</div>`;
+      html += `<span class="diff-inline-agent-name" style="color:${opColor}">${esc(op.model_id || '')}</span>`;
+      html += '<span class="diff-inline-bot-badge">Reviewer</span>';
+      html += `<span class="diff-inline-opinion-action ${actionClass}">${esc(actionLabel)}</span>`;
+      html += '</div>';
+      html += `<div class="diff-inline-opinion-body">${renderMd(op.reasoning || '')}</div>`;
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '</div></div></div></div>';
+  return html;
+}
+
+export function toggleConvIssue(issueId) {
+  const card = document.getElementById('conv-card-' + issueId);
+  if (!card) return;
+  card.classList.toggle('conv-collapsed');
+}
+
+/* ── Main render ───────────────────────────────────────── */
 
 export function renderConversationTab(container) {
   if (!state.sessionId) {
@@ -47,125 +187,93 @@ export function renderConversationTab(container) {
   ensureIssueDisplayNumbers();
 
   if (reviews.length) {
-    html += '<div class="conv-timeline">';
+    // Build flat event list
+    const events = [];
     reviews.forEach(review => {
-      const color = getModelColor(review.model_id);
-      const modelLabel = review.model_id;
-      const timeStr = new Date(review.submitted_at).toLocaleString();
-      const turnLabel = review.turn > 0 ? `Turn ${review.turn}` : '';
-
-      html += '<div class="conv-review-entry">';
-      // Header
-      html += '<div class="conv-review-header">';
-      html += `<span class="conv-review-model-dot" style="background:${color}"></span>`;
-      html += `<span class="conv-review-model-name" style="color:${color}">${esc(modelLabel)}</span>`;
-      html += `<span class="conv-review-meta">${turnLabel ? esc(turnLabel) + ' · ' : ''}${esc(timeStr)} · ${review.issue_count}개 이슈</span>`;
-      html += '</div>';
-      // Summary
-      if (review.summary) {
-        html += `<div class="conv-review-summary">${renderMd(review.summary)}</div>`;
-      }
-      // Issue cards for this reviewer
+      events.push({ type: 'review', review });
       const reviewerIssues = state.issues.filter(i => i.raised_by === review.model_id && i.turn === review.turn);
-      if (reviewerIssues.length) {
-        html += '<div class="conv-issue-cards">';
-        reviewerIssues.forEach(issue => {
-          const sev = issue.severity || 'low';
-          const sevColor = SEVERITY_COLORS[sev] || SEVERITY_COLORS.low;
-          const sevLabel = SEVERITY_LABELS[sev] || sev;
-          const range = _issueRangeLabel(issue);
-          const fileLabel = issue.file ? (issue.file.split('/').pop() + (range ? ':' + range : '')) : '';
-          const consensusIcon = issue.consensus ? ' ✅' : '';
-          const displayNo = state.issueNumberById[issue.id] || 0;
+      reviewerIssues.forEach(issue => {
+        events.push({ type: 'issue', issue, review });
+      });
+    });
 
-          html += `<div class="conv-issue-card">`;
-          html += '<div class="conv-issue-card-header">';
-          html += `<span class="conv-issue-card-severity" style="background:${sevColor}20;color:${sevColor}">${esc(sevLabel)}</span>`;
-          html += `<span class="conv-issue-card-number">#${displayNo}</span>`;
-          html += `<span class="conv-issue-card-title">${esc(issue.title || issue.description?.slice(0, 80) || 'Untitled')}${consensusIcon}</span>`;
-          if (issue.file) html += `<button class="conv-issue-card-goto" title="Changes에서 보기" onclick="event.stopPropagation();scrollToFileInChanges('${_escapeAttr(issue.file || '')}', ${issue.line_start || issue.line || 0}, '${_escapeAttr(issue.id)}')">Changes →</button>`;
-          html += '</div>';
-          if (fileLabel) html += `<span class="conv-issue-card-file" data-path="${_escapeAttr(issue.file)}" onclick="onFileTreeFileContextMenu(event, this)">${esc(fileLabel)}</span>`;
-          // Description
-          if (issue.description) {
-            html += `<div class="diff-inline-thread-desc">${renderMd(issue.description)}</div>`;
-          }
-          // Mini diff (async load)
-          if (issue.file) {
-            html += `<div class="conv-issue-card-diff" id="conv-diff-${issue.id}"></div>`;
-          }
-          // Thread opinions
-          const discussions = _getDiscussionOpinions(issue);
-          if (discussions.length) {
-            html += '<div class="conv-issue-card-thread">';
-            discussions.forEach(op => {
-              const opColor = getModelColor(op.model_id || '');
-              const actionLabel = ACTION_LABELS[op.action] || op.action;
-              const actionClass = _reviewerActionClass(op.action);
-              html += '<div class="diff-inline-opinion">';
-              html += `<span class="diff-inline-opinion-dot" style="background:${opColor}"></span>`;
-              html += `<span class="diff-inline-opinion-model">${esc(op.model_id || '')}</span>`;
-              html += `<span class="diff-inline-opinion-action ${actionClass}">${esc(actionLabel)}</span>`;
-              html += `<span class="diff-inline-opinion-text">${renderMd(op.reasoning || '')}</span>`;
-              html += '</div>';
-            });
-            html += '</div>';
-          }
-          html += '</div>';
-        });
-        html += '</div>';
+    html += '<div class="conv-timeline">';
+    events.forEach((evt, idx) => {
+      const isLast = idx === events.length - 1;
+      const color = getModelColor(evt.review.model_id);
+      const agent = _findAgent(evt.review.model_id);
+
+      if (evt.type === 'review') {
+        html += _renderReviewSummaryCard(evt.review, color, agent, isLast);
+      } else {
+        html += _renderIssueCard(evt.issue, evt.review, color, agent, isLast);
       }
-      html += '</div>';
     });
     html += '</div>';
   }
 
   container.innerHTML = html;
 
-  // Async load mini diffs for issue cards
+  // Async load mini diffs for issue cards (skip already cached)
   const allReviewerIssues = state.issues.filter(i => reviews.some(r => r.model_id === i.raised_by));
   allReviewerIssues.forEach(async (issue) => {
     if (!issue.file) return;
+    if (_miniDiffCache.has(issue.id)) return;
     const diffEl = document.getElementById(`conv-diff-${issue.id}`);
     if (!diffEl) return;
     const diffContent = await fetchDiff(issue.file);
     const target = _issueLineRange(issue);
 
+    const _setDiff = (html) => {
+      _miniDiffCache.set(issue.id, html);
+      // Element may have been detached by re-render; find fresh reference
+      const el = document.getElementById(`conv-diff-${issue.id}`);
+      if (el) el.innerHTML = html;
+    };
+
     // If diff doesn't contain the target lines, fetch source directly
-    if (diffContent && target.start !== null && !diffContainsLine(diffContent, target.start)) {
+    if (target.start !== null && (!diffContent || !diffContainsLine(diffContent, target.start))) {
       const ctx = 3;
       const start = Math.max(1, target.start - ctx);
       const end = (target.end ?? target.start) + ctx;
       const data = await fetchFileLines(issue.file, start, end);
       if (data) {
-        diffEl.innerHTML = renderSourceLines(data, issue);
+        _setDiff(renderSourceLines(data, issue));
         return;
       }
     }
 
     if (diffContent) {
-      diffEl.innerHTML = renderDiffWithFocus(diffContent, issue, 3);
+      _setDiff(renderDiffWithFocus(diffContent, issue, 3));
     }
   });
 }
 
-export function scrollToFileInChanges(filePath, lineStart, issueId) {
-  window.switchMainTab('changes');
-  // After tab switch, scroll to the file section
-  requestAnimationFrame(() => {
-    const anchor = document.querySelector(`.changes-diff-section[data-file="${CSS.escape(filePath)}"]`);
-    if (anchor) {
-      anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      // Highlight the relevant inline comment if issueId is provided
-      if (issueId) {
-        setTimeout(() => {
-          highlightIssueRange(issueId);
-          const commentEl = document.getElementById(`inline-issue-${issueId}`);
-          if (commentEl) {
-            commentEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
-        }, 300);
+export function scrollToFileInChanges(filePath, lineStart, issueId, { push = true } = {}) {
+  const needsSwitch = state.mainTab !== 'changes';
+
+  if (needsSwitch) {
+    window.switchMainTab('changes', { push });
+  }
+
+  // Wait for the render to finish (resolves instantly if already rendered)
+  changesReady().then(() => {
+    requestAnimationFrame(() => {
+      if (issueId) highlightIssueRange(issueId);
+
+      // Prefer scrolling directly to the inline comment
+      const commentEl = issueId ? document.getElementById(`inline-issue-${issueId}`) : null;
+      const scrollContainer = document.getElementById('main-tab-content');
+      const target = commentEl || document.querySelector(`.changes-diff-section[data-file="${CSS.escape(filePath)}"]`);
+      if (target && scrollContainer) {
+        // Account for sticky diff header height
+        const stickyHeader = target.closest('.changes-diff-section')?.querySelector('.changes-diff-header');
+        const offset = stickyHeader ? stickyHeader.offsetHeight + 8 : 8;
+        const targetTop = target.getBoundingClientRect().top - scrollContainer.getBoundingClientRect().top + scrollContainer.scrollTop - offset;
+        scrollContainer.scrollTo({ top: targetTop, behavior: 'smooth' });
+      } else if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
-    }
+    });
   });
 }

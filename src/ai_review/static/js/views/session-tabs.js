@@ -4,6 +4,7 @@ import { esc } from '../utils.js';
 import { STATUS_TAB_STYLES, STATUS_TAB_LABELS } from '../constants.js';
 import { closeSSE } from '../features/sse.js';
 import { resetFileTreeAutoExpand } from './file-panel.js';
+import { clearMiniDiffCache } from './conversation.js';
 
 export { fetchSessions } from '../api.js';
 
@@ -29,7 +30,7 @@ export function renderSessionTabs() {
   }).join('');
 }
 
-export async function switchSession(sid) {
+export async function switchSession(sid, { push = true } = {}) {
   if (sid === state.sessionId) return;
   closeSSE();
   try {
@@ -48,6 +49,7 @@ export async function switchSession(sid) {
   state.selectedAgent = null;
   state.selectedFileDiff = null;
   state.diffCache = {};
+  clearMiniDiffCache();
   state.implementationContext = null;
   state.reviews = [];
   state.files = [];
@@ -58,9 +60,9 @@ export async function switchSession(sid) {
   state.collapsedIssueGroups = {};
   state.expandedReasoning = {};
   state.reviewerExpanded = {};
-  window.switchMainTab('conversation');
+  window.switchMainTab('conversation', { push: false });
   window._uiSaveStateToStorage();
-  router.push({ sessionId: sid, mainTab: 'conversation' });
+  if (push) router.push({ sessionId: sid, mainTab: 'conversation' });
   renderSessionTabs();
   window.connectSSE(sid);
   await window.pollStatus();
