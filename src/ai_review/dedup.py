@@ -9,33 +9,12 @@ def deduplicate_issues(issues: list[Issue]) -> list[Issue]:
     """Deduplicate issues based on file, line, and title similarity.
 
     Returns a new list with duplicates merged into the original issue's thread.
+
+    NOTE: Dedup is temporarily disabled — the current word-overlap algorithm
+    does not work with Korean titles.  Returns issues as-is until a better
+    strategy (char n-gram / line-range overlap / LLM) is implemented.
     """
-    if not issues:
-        return []
-
-    result: list[Issue] = []
-    merged_ids: set[str] = set()
-
-    for i, issue in enumerate(issues):
-        if issue.id in merged_ids:
-            continue
-
-        # Find duplicates of this issue
-        duplicates: list[Issue] = []
-        for j in range(i + 1, len(issues)):
-            candidate = issues[j]
-            if candidate.id in merged_ids:
-                continue
-            if _is_duplicate(issue, candidate):
-                duplicates.append(candidate)
-                merged_ids.add(candidate.id)
-
-        if duplicates:
-            issue = _merge_issues(issue, duplicates)
-
-        result.append(issue)
-
-    return result
+    return list(issues)
 
 
 def _is_duplicate(a: Issue, b: Issue) -> bool:

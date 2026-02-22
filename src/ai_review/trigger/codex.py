@@ -123,6 +123,8 @@ class CodexTrigger(TriggerEngine):
                 args.extend(["--model", model_config.model_id])
             args.append(prompt)
 
+        command_str = shlex.join(args)
+
         try:
             env = dict(os.environ)
             env.update(self.env_vars)
@@ -137,10 +139,12 @@ class CodexTrigger(TriggerEngine):
             )
             self._procs.add(proc)
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     self._read_stream(proc, client_session_id, model_id, is_resume),
                     timeout=self._timeout_seconds,
                 )
+                result.command = command_str
+                return result
             except asyncio.TimeoutError:
                 with suppress(ProcessLookupError):
                     proc.kill()
@@ -150,6 +154,7 @@ class CodexTrigger(TriggerEngine):
                     success=False,
                     error=f"codex CLI timed out after {int(self._timeout_seconds)}s",
                     client_session_id=client_session_id,
+                    command=command_str,
                 )
             finally:
                 self._procs.discard(proc)
@@ -158,12 +163,14 @@ class CodexTrigger(TriggerEngine):
                 success=False,
                 error="codex CLI not found. Install Codex CLI first.",
                 client_session_id=client_session_id,
+                command=command_str,
             )
         except Exception as e:
             return TriggerResult(
                 success=False,
                 error=str(e),
                 client_session_id=client_session_id,
+                command=command_str,
             )
 
     async def _read_stream(

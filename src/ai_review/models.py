@@ -128,6 +128,7 @@ class Opinion(BaseModel):
     turn: int = 0
     mentions: list[str] = Field(default_factory=list)
     status_value: str | None = None  # action=STATUS_CHANGE일 때만 사용
+    previous_status: str | None = None
     timestamp: datetime = Field(default_factory=_utcnow)
 
 

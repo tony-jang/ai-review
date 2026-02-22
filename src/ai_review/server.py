@@ -54,35 +54,27 @@ def create_app(port: int = 3000) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async with mcp_http_app.lifespan(app):
-            # Wrap uvicorn's SIGINT/SIGTERM handler to disconnect SSE
-            # clients *before* uvicorn's connection drain phase.
-            # Without this, uvicorn waits for SSE connections to close,
-            # but they only close when disconnect_all() is called in
-            # lifespan shutdown — which runs *after* the drain timeout.
-            import signal
+            # Install event-loop-level signal handlers.  signal.signal()
+            # can be overwritten by libraries (docket, anyio, etc.) over
+            # the lifetime of a long-running process.  loop.add_signal_handler()
+            # uses the event loop's internal waker and is immune to that.
+            import signal as _signal
 
-            _original = {}
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                _original[sig] = signal.getsignal(sig)
+            _uvicorn_server = getattr(app.state, "_uvicorn_server", None)
+            if _uvicorn_server is not None:
+                loop = asyncio.get_running_loop()
+                for sig in (_signal.SIGINT, _signal.SIGTERM):
+                    loop.add_signal_handler(
+                        sig, _uvicorn_server.handle_exit, sig, None
+                    )
 
-            def _pre_shutdown(sig, frame):
-                manager.broker.disconnect_all()
-                orig = _original.get(sig)
-                if callable(orig):
-                    orig(sig, frame)
-
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                signal.signal(sig, _pre_shutdown)
-
+            yield
+            manager.broker.disconnect_all()
             try:
-                yield
-            finally:
-                manager.broker.disconnect_all()
-                try:
-                    await asyncio.wait_for(orchestrator.close(), timeout=3)
-                except asyncio.TimeoutError:
-                    pass
-                await manager.flush()
+                await asyncio.wait_for(orchestrator.close(), timeout=3)
+            except asyncio.TimeoutError:
+                pass
+            await manager.flush()
 
     app = FastAPI(title="AI Review", version="0.1.0", lifespan=lifespan)
     app.state.manager = manager
@@ -161,7 +153,7 @@ def create_app(port: int = 3000) -> FastAPI:
         if client_type == "gemini":
             return GeminiTrigger(timeout_seconds=max(10.0, timeout_seconds + 5.0))
         if client_type == "opencode":
-            return OpenCodeTrigger(timeout=max(10.0, timeout_seconds + 5.0))
+            return OpenCodeTrigger(timeout_seconds=max(10.0, timeout_seconds + 5.0))
         return ClaudeCodeTrigger()
 
     def _build_connection_test_prompt(
@@ -238,28 +230,34 @@ def create_app(port: int = 3000) -> FastAPI:
     async def api_available_models():
         return JSONResponse({
             "claude-code": [
-                {"model_id": "claude-opus-4-1-20250805", "label": "Opus 4.1 (Latest)"},
-                {"model_id": "claude-sonnet-4-20250514", "label": "Sonnet 4"},
-                {"model_id": "claude-opus-4-20250514", "label": "Opus 4"},
+                {"model_id": "claude-opus-4-6", "label": "Opus 4.6 (Latest)"},
+                {"model_id": "claude-sonnet-4-6", "label": "Sonnet 4.6"},
+                {"model_id": "claude-haiku-4-5", "label": "Haiku 4.5"},
+                {"model_id": "claude-opus-4-5", "label": "Opus 4.5"},
+                {"model_id": "claude-sonnet-4-5", "label": "Sonnet 4.5"},
             ],
             "codex": [
-                {"model_id": "gpt-5.2-codex", "label": "GPT-5.2 Codex (Latest/Recommended)"},
+                {"model_id": "gpt-5.3-codex", "label": "GPT-5.3 Codex (Latest)"},
+                {"model_id": "gpt-5.2-codex", "label": "GPT-5.2 Codex"},
                 {"model_id": "gpt-5.1-codex-max", "label": "GPT-5.1 Codex Max"},
-                {"model_id": "gpt-5.1-codex", "label": "GPT-5.1 Codex"},
-                {"model_id": "gpt-5.1-codex-mini", "label": "GPT-5.1 Codex mini"},
-                {"model_id": "gpt-5-codex", "label": "GPT-5 Codex"},
-                {"model_id": "codex-mini-latest", "label": "codex-mini-latest"},
-                {"model_id": "o3", "label": "o3 (Legacy)"},
-                {"model_id": "o4-mini", "label": "o4-mini (Legacy)"},
+                {"model_id": "gpt-5-codex-mini", "label": "GPT-5 Codex Mini"},
+                {"model_id": "codex-mini-latest", "label": "codex-mini-latest (o4-mini)"},
             ],
             "gemini": [
-                {"model_id": "gemini-3-pro-preview", "label": "Gemini 3 Pro Preview (Latest)"},
-                {"model_id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+                {"model_id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro (Latest)"},
+                {"model_id": "gemini-3-pro-preview", "label": "Gemini 3 Pro"},
+                {"model_id": "gemini-3-flash-preview", "label": "Gemini 3 Flash"},
                 {"model_id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
                 {"model_id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
                 {"model_id": "gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash-Lite"},
             ],
-            "opencode": [],
+            "opencode": [
+                {"model_id": "big-pickle", "label": "Big Pickle (Free)"},
+                {"model_id": "minimax-m2.5-free", "label": "MiniMax M2.5 Free (Coding)"},
+                {"model_id": "glm-5-free", "label": "GLM-5 Free (Reasoning)"},
+                {"model_id": "gpt-5-nano", "label": "GPT-5 Nano (Free)"},
+                {"model_id": "trinity-large-preview-free", "label": "Trinity Large Free"},
+            ],
         })
 
     @app.get("/api/agents/connection-targets")
@@ -340,83 +338,120 @@ def create_app(port: int = 3000) -> FastAPI:
         }
         pending_connection_tests[test_token] = callback_state
 
-        trigger_task: asyncio.Task | None = None
-        started_at = time.monotonic()
-        trigger_result: TriggerResult | None = None
+        def _trigger_dict(tr: TriggerResult | None) -> dict:
+            if not tr:
+                return {"success": None, "command": "", "output": "", "error": ""}
+            return {"success": tr.success, "command": tr.command, "output": tr.output, "error": tr.error}
 
-        try:
-            client_session_id = await trigger.create_session(model_config.id)
-            trigger_task = asyncio.create_task(
-                trigger.send_prompt(
-                    client_session_id,
-                    model_config.id,
-                    prompt,
-                    model_config=model_config,
+        _GRACE_SECONDS = 3.0
+
+        async def _event_stream():
+            trigger_task: asyncio.Task | None = None
+            trigger_result: TriggerResult | None = None
+            started_at = time.monotonic()
+
+            try:
+                # Phase 1: prompt is ready — send immediately
+                yield json.dumps({
+                    "type": "started",
+                    "prompt": prompt,
+                    "test_token": test_token,
+                    "session_marker": session_marker,
+                }) + "\n"
+
+                client_session_id = await trigger.create_session(model_config.id)
+                trigger_task = asyncio.create_task(
+                    trigger.send_prompt(
+                        client_session_id, model_config.id, prompt, model_config=model_config,
+                    )
                 )
-            )
 
-            while True:
-                if callback_state["event"].is_set():
-                    break
-                if trigger_task.done():
-                    try:
-                        trigger_result = trigger_task.result()
-                    except asyncio.CancelledError:
-                        trigger_result = TriggerResult(success=False, error="connection test trigger cancelled")
-                    except Exception as exc:
-                        trigger_result = TriggerResult(success=False, error=str(exc))
-                    if not trigger_result.success:
+                trigger_done_at: float | None = None
+
+                while True:
+                    if callback_state["event"].is_set():
+                        break
+
+                    if trigger_task.done() and trigger_done_at is None:
+                        trigger_done_at = time.monotonic()
+                        try:
+                            trigger_result = trigger_task.result()
+                        except asyncio.CancelledError:
+                            trigger_result = TriggerResult(success=False, error="connection test trigger cancelled")
+                        except Exception as exc:
+                            trigger_result = TriggerResult(success=False, error=str(exc))
+
+                        # Phase 2: trigger finished — send command/output/error
+                        yield json.dumps({
+                            "type": "trigger_done",
+                            "trigger": _trigger_dict(trigger_result),
+                        }) + "\n"
+
+                        if not trigger_result.success:
+                            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                            yield json.dumps({
+                                "type": "result",
+                                "ok": False,
+                                "status": "trigger_failed",
+                                "reason": trigger_result.error or "trigger failed",
+                                "elapsed_ms": elapsed_ms,
+                            }) + "\n"
+                            return
+
+                    # Grace period: trigger succeeded but no callback
+                    if trigger_done_at is not None and time.monotonic() - trigger_done_at > _GRACE_SECONDS:
                         elapsed_ms = int((time.monotonic() - started_at) * 1000)
-                        return JSONResponse({
+                        yield json.dumps({
+                            "type": "result",
                             "ok": False,
-                            "status": "trigger_failed",
-                            "reason": trigger_result.error or "trigger failed",
+                            "status": "no_callback",
+                            "reason": "에이전트가 완료되었으나 콜백이 수신되지 않았습니다",
                             "elapsed_ms": elapsed_ms,
-                            "test_token": test_token,
-                            "session_marker": session_marker,
-                        })
-                elapsed = time.monotonic() - started_at
-                if elapsed >= timeout_seconds:
-                    elapsed_ms = int(elapsed * 1000)
-                    return JSONResponse({
-                        "ok": False,
-                        "status": "timeout",
-                        "reason": f"callback not received within {timeout_seconds:.1f}s",
-                        "elapsed_ms": elapsed_ms,
-                        "test_token": test_token,
-                        "session_marker": session_marker,
-                    })
-                await asyncio.sleep(0.05)
+                        }) + "\n"
+                        return
 
-            elapsed_ms = int((time.monotonic() - started_at) * 1000)
-            callback_payload = {
-                "payload": callback_state.get("payload"),
-                "received_at": callback_state.get("received_at"),
-                "client_host": callback_state.get("client_host"),
-            }
-            if trigger_result is None and trigger_task is not None and trigger_task.done():
-                with suppress(Exception):
-                    trigger_result = trigger_task.result()
+                    elapsed = time.monotonic() - started_at
+                    if elapsed >= timeout_seconds:
+                        elapsed_ms = int(elapsed * 1000)
+                        yield json.dumps({
+                            "type": "result",
+                            "ok": False,
+                            "status": "timeout",
+                            "reason": f"callback not received within {timeout_seconds:.1f}s",
+                            "elapsed_ms": elapsed_ms,
+                            "trigger": _trigger_dict(trigger_result),
+                        }) + "\n"
+                        return
 
-            return JSONResponse({
-                "ok": True,
-                "status": "callback_received",
-                "elapsed_ms": elapsed_ms,
-                "test_token": test_token,
-                "session_marker": session_marker,
-                "callback": callback_payload,
-                "trigger": {
-                    "success": trigger_result.success if trigger_result else None,
-                    "error": trigger_result.error if trigger_result else "",
-                },
-            })
-        finally:
-            pending_connection_tests.pop(test_token, None)
-            if trigger_task and not trigger_task.done():
-                trigger_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await asyncio.wait_for(trigger_task, timeout=1.0)
-            await trigger.close()
+                    await asyncio.sleep(0.05)
+
+                # Callback received
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                if trigger_result is None and trigger_task is not None and trigger_task.done():
+                    with suppress(Exception):
+                        trigger_result = trigger_task.result()
+
+                yield json.dumps({
+                    "type": "result",
+                    "ok": True,
+                    "status": "callback_received",
+                    "elapsed_ms": elapsed_ms,
+                    "callback": {
+                        "payload": callback_state.get("payload"),
+                        "received_at": callback_state.get("received_at"),
+                        "client_host": callback_state.get("client_host"),
+                    },
+                    "trigger": _trigger_dict(trigger_result),
+                }) + "\n"
+            finally:
+                pending_connection_tests.pop(test_token, None)
+                if trigger_task and not trigger_task.done():
+                    trigger_task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await asyncio.wait_for(trigger_task, timeout=1.0)
+                await trigger.close()
+
+        return StreamingResponse(_event_stream(), media_type="application/x-ndjson")
 
     # ------------------------------------------------------------------
     # Git utilities
@@ -969,10 +1004,9 @@ def create_app(port: int = 3000) -> FastAPI:
                 transition(session, SessionStatus.DEDUP)
                 manager.broker.publish("phase_change", {"status": "dedup", "session_id": session_id})
 
-            if not session.issues:
-                issues = manager.create_issues_from_reviews(session_id)
-                deduped = deduplicate_issues(issues)
-                session.issues = deduped
+            # Ensure any remaining reviews are materialized as issues
+            manager.create_issues_from_reviews(session_id)
+            session.issues = deduplicate_issues(session.issues)
 
             apply_consensus(session.issues, session.config.consensus_threshold)
 
@@ -994,7 +1028,7 @@ def create_app(port: int = 3000) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(e))
 
     @app.post("/api/sessions/{session_id}/finish")
-    async def api_finish_session(session_id: str):
+    async def api_finish_session(session_id: str, force: bool = False):
         """Finish the review session and generate final report."""
         from ai_review.consensus import apply_consensus
         from ai_review.dedup import deduplicate_issues
@@ -1007,15 +1041,31 @@ def create_app(port: int = 3000) -> FastAPI:
                 transition(session, SessionStatus.DEDUP)
                 manager.broker.publish("phase_change", {"status": "dedup", "session_id": session_id})
 
-            if not session.issues:
-                issues = manager.create_issues_from_reviews(session_id)
-                deduped = deduplicate_issues(issues)
-                session.issues = deduped
+            # Ensure any remaining reviews are materialized as issues
+            manager.create_issues_from_reviews(session_id)
+            session.issues = deduplicate_issues(session.issues)
 
             apply_consensus(session.issues, session.config.consensus_threshold)
 
             if can_transition(session, SessionStatus.DELIBERATING):
                 transition(session, SessionStatus.DELIBERATING)
+
+            # Validation gate: block finish if unresolved issues exist
+            if not force:
+                unresolved = manager.get_unresolved_issues(session_id)
+                if unresolved:
+                    if can_transition(session, SessionStatus.FIXING):
+                        transition(session, SessionStatus.FIXING)
+                        manager.broker.publish("phase_change", {
+                            "status": "fixing", "session_id": session_id,
+                        })
+                    manager.persist()
+                    return JSONResponse(status_code=409, content={
+                        "detail": "미해결 이슈가 있습니다. 모든 이슈를 해결하거나 force=true로 강제 완료하세요.",
+                        "session_status": session.status.value,
+                        "unresolved_count": len(unresolved),
+                        "unresolved_issues": unresolved,
+                    })
 
             if can_transition(session, SessionStatus.COMPLETE):
                 transition(session, SessionStatus.COMPLETE)

@@ -72,7 +72,6 @@ class SessionManager:
         self.on_issue_status_changed: Callable[[str, str, str, str], Any] | None = None
         # (session_id, issue_id, new_status, author)
         self._load_state()
-        self._ensure_default_presets()
 
     @property
     def current_session(self) -> ReviewSession | None:
@@ -152,20 +151,6 @@ class SessionManager:
             self._current_session_id = current if current in loaded else None
         except Exception:
             logger.exception("Failed to load persisted session state from %s", self._state_file)
-
-    _DEFAULT_PRESETS: list[dict[str, str]] = [
-        {"id": "preset-claude-code", "client_type": "claude-code", "color": "#8B5CF6", "avatar": "🟣"},
-        {"id": "preset-codex", "client_type": "codex", "color": "#22C55E", "avatar": "🟢"},
-        {"id": "preset-gemini", "client_type": "gemini", "color": "#3B82F6", "avatar": "🔵"},
-    ]
-
-    def _ensure_default_presets(self) -> None:
-        """Seed default presets only on first run (no presets at all)."""
-        if self.agent_presets:
-            return
-        for preset in self._DEFAULT_PRESETS:
-            self.agent_presets[preset["id"]] = ModelConfig(**preset)
-        self.persist()
 
     def persist(self) -> None:
         """Mark state as dirty and schedule a debounced flush.
@@ -690,6 +675,9 @@ class SessionManager:
         review = Review(model_id=model_id, issues=raw_issues, summary=summary)
         session.reviews.append(review)
 
+        # Incrementally create Issue objects so they appear in the UI immediately
+        self._materialize_review_issues(session, review)
+
         self.broker.publish(
             "review_submitted",
             {
@@ -770,13 +758,53 @@ class SessionManager:
     def _current_turn(session: ReviewSession) -> int:
         return max((i.turn for i in session.issues), default=0)
 
+    def _materialize_review_issues(self, session: ReviewSession, review: Review) -> list[Issue]:
+        """Convert a single Review's RawIssues into Issue objects and append to session.issues."""
+        new_issues: list[Issue] = []
+        for raw in review.issues:
+            normalized_line, normalized_start, normalized_end = self._normalize_issue_lines(
+                raw.line,
+                raw.line_start,
+                raw.line_end,
+            )
+            issue = Issue(
+                title=raw.title,
+                severity=raw.severity,
+                file=raw.file,
+                line=normalized_line,
+                line_start=normalized_start,
+                line_end=normalized_end,
+                description=raw.description,
+                suggestion=raw.suggestion,
+                raised_by=review.model_id,
+                thread=[
+                    Opinion(
+                        model_id=review.model_id,
+                        action=OpinionAction.RAISE,
+                        reasoning=raw.description,
+                        suggested_severity=raw.severity,
+                        turn=0,
+                    )
+                ],
+            )
+            new_issues.append(issue)
+        session.issues.extend(new_issues)
+        return new_issues
+
     def create_issues_from_reviews(self, session_id: str) -> list[Issue]:
-        """Create Issue objects from all submitted RawIssues (pre-dedup)."""
+        """Create Issue objects from all submitted RawIssues (pre-dedup).
+
+        Skips reviews whose issues have already been materialized
+        (i.e. by submit_review → _materialize_review_issues).
+        """
         session = self.get_session(session_id)
 
-        issues: list[Issue] = []
+        existing_raised_by = {(i.raised_by, i.title) for i in session.issues}
+
         for review in session.reviews:
             for raw in review.issues:
+                if (review.model_id, raw.title) in existing_raised_by:
+                    continue
                 normalized_line, normalized_start, normalized_end = self._normalize_issue_lines(
                     raw.line,
                     raw.line_start,
@@ -802,11 +830,11 @@ class SessionManager:
                         )
                     ],
                 )
-                issues.append(issue)
+                session.issues.append(issue)
+                existing_raised_by.add((review.model_id, raw.title))
 
-        session.issues = issues
         self.persist()
-        return issues
+        return session.issues
 
     def get_issues(self, session_id: str) -> list[dict]:
         """Get all issues for a session."""
@@ -860,7 +888,10 @@ class SessionManager:
         """Submit a coding agent's response to a confirmed issue."""
         session = self.get_session(session_id)
         if session.status not in (SessionStatus.AGENT_RESPONSE, SessionStatus.DELIBERATING):
-            raise ValueError(f"Cannot submit issue response in {session.status.value} state")
+            hint = ""
+            if session.status == SessionStatus.FIXING:
+                hint = " Use 'arv status <issue_id> fixed -b <reasoning>' to mark issues as fixed."
+            raise ValueError(f"Cannot submit issue response in {session.status.value} state.{hint}")
 
         # Find the issue
         issue = None
@@ -1063,6 +1094,8 @@ class SessionManager:
                 if parsed_action == OpinionAction.WITHDRAW:
                     if model_id != issue.raised_by:
                         raise ValueError("Only the original raiser can withdraw an issue")
+                    if issue.consensus:
+                        return {"status": "duplicate", "thread_length": len(issue.thread), "turn": target_turn}
 
                 # Human 의견은 새 턴을 열고 이슈를 재오픈해 모든 에이전트가 다시 검토하도록 유도
                 if is_human_like:
@@ -1096,6 +1129,7 @@ class SessionManager:
                     issue.consensus = True
                     issue.consensus_type = "closed"
                     issue.final_severity = Severity.DISMISSED
+                    issue.progress_status = IssueProgressStatus.WONT_FIX
 
                 self.broker.publish(
                     "opinion_submitted",
@@ -1609,10 +1643,10 @@ class SessionManager:
         reasoning: str = "",
         dismissed_by: str = "",
     ) -> dict:
-        """Dismiss a fix_required issue during FIXING state."""
+        """Dismiss a fix_required issue."""
         session = self.get_session(session_id)
-        if session.status != SessionStatus.FIXING:
-            raise ValueError(f"Cannot dismiss in {session.status.value} state")
+        if session.status == SessionStatus.COMPLETE:
+            raise ValueError("Cannot dismiss in complete state")
         issue = next((i for i in session.issues if i.id == issue_id), None)
         if issue is None:
             raise KeyError(f"Issue not found: {issue_id}")
@@ -1696,6 +1730,7 @@ class SessionManager:
             action=OpinionAction.STATUS_CHANGE,
             reasoning=log_reasoning,
             status_value=target.value,
+            previous_status=current.value,
             turn=issue.turn,
         )
         issue.thread.append(opinion)
@@ -1758,6 +1793,26 @@ class SessionManager:
             "issues": actionable,
             "by_file": by_file,
         }
+
+    def get_unresolved_issues(self, session_id: str) -> list[dict]:
+        """Return issues not yet resolved (for finish validation)."""
+        session = self.get_session(session_id)
+        terminal = {IssueProgressStatus.COMPLETED, IssueProgressStatus.WONT_FIX}
+        unresolved = []
+        for issue in session.issues:
+            if issue.consensus_type == "dismissed":
+                continue
+            if issue.progress_status in terminal:
+                continue
+            unresolved.append({
+                "id": issue.id,
+                "title": issue.title,
+                "severity": (issue.final_severity or issue.severity).value,
+                "file": issue.file,
+                "progress_status": issue.progress_status.value,
+                "consensus_type": issue.consensus_type,
+            })
+        return unresolved
 
     def _extract_mentions(self, text: str, session: ReviewSession) -> list[str]:
         """Extract @model mentions from free-form text."""

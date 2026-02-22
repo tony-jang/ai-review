@@ -93,6 +93,7 @@ Object.assign(window, {
   _amUpdateNewStrictnessUI: agentManager._amUpdateNewStrictnessUI,
   _amOnNewClientTypeChange: agentManager._amOnNewClientTypeChange,
   _amTestConnection: agentManager._amTestConnection,
+  _amShowConnTestDetail: agentManager._amShowConnTestDetail,
   _amSubmitNewAgent: agentManager._amSubmitNewAgent,
   removeAgent: agentManager.removeAgent,
   toggleAgentEnabled: agentManager.toggleAgentEnabled,
@@ -159,6 +160,9 @@ Object.assign(window, {
 
   // From resize
   _syncLeftPaneLayout,
+
+  // Issue context menu
+  showIssueMenu,
 
   // Cross-module calls via window
   renderAssistMessages: assist.renderAssistMessages,
@@ -240,6 +244,57 @@ export function insertMention(mention) {
   const pos = start + mention.length;
   el.focus();
   el.setSelectionRange(pos, pos);
+}
+
+// --- Issue Context Menu ---
+
+function _hideIssueContextMenu() {
+  const menu = document.getElementById('issue-context-menu');
+  if (!menu) return;
+  menu.classList.remove('show');
+  menu.style.left = '-9999px';
+  menu.style.top = '-9999px';
+}
+
+function _ensureIssueContextMenu() {
+  let menu = document.getElementById('issue-context-menu');
+  if (menu) return menu;
+  menu = document.createElement('div');
+  menu.id = 'issue-context-menu';
+  menu.className = 'file-context-menu';
+  menu.addEventListener('click', async (e) => {
+    const btn = e.target?.closest?.('.file-context-item');
+    if (!btn) return;
+    if (btn.dataset?.action === 'copy-ref') {
+      const ref = menu.dataset.issueRef || '';
+      await navigator.clipboard.writeText(ref);
+      report.showToast('이슈 번호가 복사되었습니다');
+    }
+    _hideIssueContextMenu();
+  });
+  document.body.appendChild(menu);
+  document.addEventListener('click', (e) => { if (!menu.contains(e.target)) _hideIssueContextMenu(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') _hideIssueContextMenu(); });
+  return menu;
+}
+
+function showIssueMenu(event, sessionId, displayNo) {
+  event.preventDefault();
+  event.stopPropagation();
+  const menu = _ensureIssueContextMenu();
+  const ref = `${sessionId}#${displayNo}`;
+  menu.dataset.issueRef = ref;
+  menu.innerHTML = `<button type="button" class="file-context-item" data-action="copy-ref">이슈 번호 복사 <span style="color:var(--text-muted);margin-left:4px">${utils.esc(ref)}</span></button>`;
+  menu.style.left = '0px';
+  menu.style.top = '0px';
+  menu.classList.add('show');
+  const rect = menu.getBoundingClientRect();
+  const x = event.clientX || 0;
+  const y = event.clientY || 0;
+  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+  menu.style.left = `${Math.max(8, Math.min(x, maxLeft))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, maxTop))}px`;
 }
 
 // --- Theme ---

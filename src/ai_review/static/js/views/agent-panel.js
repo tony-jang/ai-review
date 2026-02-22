@@ -135,7 +135,7 @@ export function _updateAgentActivityUI(modelId) {
 export function _renderActivityTimeline(modelId) {
   const info = _agentActivities[modelId];
   if (!info || !info.history.length) return '';
-  const rows = info.history.slice(0, 15).map(e => {
+  const rows = info.history.map(e => {
     const normAction = _normalizeActivityAction(e.action, e.target);
     const label = ACTIVITY_LABELS[normAction] || normAction;
     const target = _formatActivityTarget(e.action, e.target);

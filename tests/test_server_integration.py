@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import re
 from unittest.mock import AsyncMock, patch
 
@@ -12,6 +13,19 @@ from httpx import ASGITransport, AsyncClient
 from ai_review.models import DiffFile, SessionStatus
 from ai_review.server import create_app
 from ai_review.trigger.base import TriggerResult
+
+
+def _parse_ndjson(raw: bytes) -> list[dict]:
+    """Parse ndjson response body into list of event dicts."""
+    return [_json.loads(line) for line in raw.decode().strip().split("\n") if line.strip()]
+
+
+def _ndjson_result(events: list[dict]) -> dict:
+    """Merge ndjson events into a single dict (last result event wins)."""
+    merged: dict = {}
+    for ev in events:
+        merged.update(ev)
+    return merged
 
 
 @pytest.fixture
@@ -270,14 +284,17 @@ class TestServerOrchestrator:
     async def test_agent_preset_crud_endpoints(self, client):
         resp = await client.get("/api/agent-presets")
         assert resp.status_code == 200
-        defaults = resp.json()
-        assert len(defaults) >= 3  # built-in presets
-        default_ids = {p["id"] for p in defaults}
-        assert "preset-claude-code" in default_ids
-        assert "preset-codex" in default_ids
+        initial = resp.json()
 
-        # Update existing default preset
-        resp = await client.put("/api/agent-presets/preset-codex", json={
+        # Add preset
+        resp = await client.post("/api/agent-presets", json={
+            "id": "test-preset",
+            "client_type": "codex",
+        })
+        assert resp.status_code == 201
+
+        # Update preset
+        resp = await client.put("/api/agent-presets/test-preset", json={
             "role": "security reviewer",
             "enabled": False,
         })
@@ -285,7 +302,7 @@ class TestServerOrchestrator:
         assert resp.json()["role"] == "security reviewer"
         assert resp.json()["enabled"] is False
 
-        # Add custom preset
+        # Add another preset
         resp = await client.post("/api/agent-presets", json={
             "id": "preset-custom",
             "client_type": "claude-code",
@@ -295,6 +312,7 @@ class TestServerOrchestrator:
 
         resp = await client.get("/api/agent-presets")
         assert resp.status_code == 200
+        assert len(resp.json()) == len(initial) + 2
         assert any(p["id"] == "preset-custom" for p in resp.json())
 
         resp = await client.delete("/api/agent-presets/preset-custom")
@@ -303,9 +321,9 @@ class TestServerOrchestrator:
 
     @pytest.mark.asyncio
     async def test_create_session_with_selected_presets(self, client, tmp_path):
-        # Default presets already registered; update roles for this test
-        await client.put("/api/agent-presets/preset-gemini", json={"role": "perf"})
-        await client.put("/api/agent-presets/preset-codex", json={"role": "security"})
+        # Create presets for this test
+        await client.post("/api/agent-presets", json={"id": "preset-gemini", "client_type": "gemini", "role": "perf"})
+        await client.post("/api/agent-presets", json={"id": "preset-codex", "client_type": "codex", "role": "security"})
 
         resp = await client.post("/api/sessions", json={
             "base": "main",
@@ -414,13 +432,16 @@ class TestServerOrchestrator:
 
         resp = await req_task
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["ok"] is True
-        assert data["status"] == "callback_received"
-        assert data["callback"]["payload"]["ping"] == "pong"
+        events = _parse_ndjson(resp.content)
+        assert any(e.get("type") == "started" and "arv ping" in e.get("prompt", "") for e in events)
+        result = _ndjson_result(events)
+        assert result["ok"] is True
+        assert result["status"] == "callback_received"
+        assert result["callback"]["payload"]["ping"] == "pong"
 
     @pytest.mark.asyncio
-    async def test_agent_connection_test_timeout(self, client, monkeypatch):
+    async def test_agent_connection_test_no_callback(self, client, monkeypatch):
+        """When trigger succeeds but no callback, should return no_callback after grace period."""
         class FakeClaudeTrigger:
             async def create_session(self, model_id: str) -> str:
                 return "fake-session"
@@ -435,12 +456,12 @@ class TestServerOrchestrator:
 
         resp = await client.post("/api/agents/connection-test", json={
             "client_type": "claude-code",
-            "timeout_seconds": 3,
+            "timeout_seconds": 30,
         })
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["ok"] is False
-        assert data["status"] == "timeout"
+        result = _ndjson_result(_parse_ndjson(resp.content))
+        assert result["ok"] is False
+        assert result["status"] == "no_callback"
 
     @pytest.mark.asyncio
     async def test_agent_connection_test_trigger_failed(self, client, monkeypatch):
@@ -449,7 +470,7 @@ class TestServerOrchestrator:
                 return "fake-session"
 
             async def send_prompt(self, client_session_id: str, model_id: str, prompt: str, *, model_config=None):
-                return TriggerResult(success=False, error="trigger boom")
+                return TriggerResult(success=False, error="trigger boom", command="claude --print test")
 
             async def close(self) -> None:
                 return None
@@ -461,10 +482,19 @@ class TestServerOrchestrator:
             "timeout_seconds": 20,
         })
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["ok"] is False
-        assert data["status"] == "trigger_failed"
-        assert "trigger boom" in data["reason"]
+        events = _parse_ndjson(resp.content)
+        # started event has prompt
+        started = next(e for e in events if e["type"] == "started")
+        assert "arv ping" in started["prompt"]
+        # trigger_done event has command/error
+        trigger_done = next(e for e in events if e["type"] == "trigger_done")
+        assert trigger_done["trigger"]["command"] == "claude --print test"
+        assert trigger_done["trigger"]["error"] == "trigger boom"
+        # result event
+        result = next(e for e in events if e["type"] == "result")
+        assert result["ok"] is False
+        assert result["status"] == "trigger_failed"
+        assert "trigger boom" in result["reason"]
 
     @pytest.mark.asyncio
     async def test_agent_connection_test_invalid_client_type(self, client):
@@ -499,10 +529,10 @@ class TestServerOrchestrator:
             "timeout_seconds": 10,
         })
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["ok"] is False
-        assert data["status"] == "trigger_failed"
-        assert "CLI crashed" in data["reason"]
+        result = _ndjson_result(_parse_ndjson(resp.content))
+        assert result["ok"] is False
+        assert result["status"] == "trigger_failed"
+        assert "CLI crashed" in result["reason"]
 
     @pytest.mark.asyncio
     async def test_agent_connection_test_token_cleaned_after_success(self, client, monkeypatch):
@@ -545,7 +575,8 @@ class TestServerOrchestrator:
 
         resp = await req_task
         assert resp.status_code == 200
-        assert resp.json()["ok"] is True
+        result = _ndjson_result(_parse_ndjson(resp.content))
+        assert result["ok"] is True
 
         # Re-use the same callback token — should be 404 (cleaned up)
         cb2 = await client.post(callback_path, json={"ping": "pong"})
@@ -557,7 +588,7 @@ class TestServerOrchestrator:
         captured: dict[str, str] = {}
 
         class FakeOpenCodeTrigger:
-            def __init__(self, timeout=60.0):
+            def __init__(self, timeout_seconds=60.0):
                 pass
 
             async def create_session(self, model_id: str) -> str:
@@ -574,12 +605,13 @@ class TestServerOrchestrator:
 
         resp = await client.post("/api/agents/connection-test", json={
             "client_type": "opencode",
-            "timeout_seconds": 5,
+            "timeout_seconds": 30,
         })
         assert resp.status_code == 200
-        assert "prompt" in captured
-        assert "curl" in captured["prompt"]
-        assert "arv ping" not in captured["prompt"]
+        events = _parse_ndjson(resp.content)
+        started = next(e for e in events if e["type"] == "started")
+        assert "curl" in started["prompt"]
+        assert "arv ping" not in started["prompt"]
 
     @pytest.mark.asyncio
     async def test_agent_connection_test_sets_env_vars(self, client, monkeypatch):
@@ -605,7 +637,7 @@ class TestServerOrchestrator:
         resp = await client.post("/api/agents/connection-test", json={
             "client_type": "claude-code",
             "model_id": "claude-test-model",
-            "timeout_seconds": 5,
+            "timeout_seconds": 30,
         })
         assert resp.status_code == 200
         env = captured_trigger["env_vars"]
@@ -649,8 +681,8 @@ class TestServerOrchestrator:
                 # May fail if model already raised this issue — that's fine
                 assert resp.status_code in (200, 400, 404)
 
-        # Finish
-        resp = await client.post(f"/api/sessions/{sid}/finish")
+        # Finish (force: issues not individually resolved)
+        resp = await client.post(f"/api/sessions/{sid}/finish?force=true")
         assert resp.status_code == 200
         report = resp.json()
         assert report["stats"]["total_issues_found"] == 2
@@ -818,7 +850,7 @@ class TestServerOrchestrator:
         issues = (await client.get(f"/api/sessions/{sid}/issues")).json()
         issue_id = issues[0]["id"]
 
-        resp = await client.post(f"/api/sessions/{sid}/finish")
+        resp = await client.post(f"/api/sessions/{sid}/finish?force=true")
         assert resp.status_code == 200
         assert (await client.get(f"/api/sessions/{sid}/status")).json()["status"] == "complete"
 
@@ -910,7 +942,7 @@ class TestServerOrchestrator:
             "issues": [{"title": "Bug", "severity": "medium", "file": "x.py", "description": "d"}],
         })
         await client.post(f"/api/sessions/{sid}/process")
-        await client.post(f"/api/sessions/{sid}/finish")
+        await client.post(f"/api/sessions/{sid}/finish?force=true")
 
         resp = await client.get(f"/api/sessions/{sid}/report")
         assert resp.status_code == 200
@@ -1238,7 +1270,7 @@ class TestAgentResponseProtocol:
 
     @pytest.mark.asyncio
     async def test_backward_compat_finish_without_agent_response(self, client, tmp_path):
-        """Existing finish API should still work (DELIBERATING → COMPLETE)."""
+        """Existing finish API should still work (DELIBERATING → COMPLETE) with force."""
         resp = await client.post("/api/sessions", json={"base": "main", "repo_path": str(tmp_path), "head": "test-branch"})
         sid = resp.json()["session_id"]
 
@@ -1248,7 +1280,7 @@ class TestAgentResponseProtocol:
         })
         await client.post(f"/api/sessions/{sid}/process")
 
-        resp = await client.post(f"/api/sessions/{sid}/finish")
+        resp = await client.post(f"/api/sessions/{sid}/finish?force=true")
         assert resp.status_code == 200
 
         status = (await client.get(f"/api/sessions/{sid}/status")).json()
@@ -1505,8 +1537,8 @@ class TestFullFlowE2E:
             })
             assert resp.status_code == 200
 
-        # 8. Finish and get report
-        resp = await client.post(f"/api/sessions/{sid}/finish")
+        # 8. Finish and get report (force: progress_status not individually updated)
+        resp = await client.post(f"/api/sessions/{sid}/finish?force=true")
         assert resp.status_code == 200
         report = resp.json()
 
@@ -1540,8 +1572,8 @@ class TestFullFlowE2E:
             "issues": [{"title": "Cache miss", "severity": "medium", "file": "cache.py", "description": "no fallback"}],
         })
 
-        # 4. Finish
-        resp = await client.post(f"/api/sessions/{sid}/finish")
+        # 4. Finish (force: issue not individually resolved)
+        resp = await client.post(f"/api/sessions/{sid}/finish?force=true")
         assert resp.status_code == 200
         report = resp.json()
 
@@ -1564,8 +1596,8 @@ class TestFullFlowE2E:
             "issues": [{"title": "Bug", "severity": "high", "file": "x.py", "description": "d"}],
         })
 
-        # 3. Finish directly (no process, no context, no fix-complete)
-        resp = await client.post(f"/api/sessions/{sid}/finish")
+        # 3. Finish directly with force (no process, no context, no fix-complete)
+        resp = await client.post(f"/api/sessions/{sid}/finish?force=true")
         assert resp.status_code == 200
 
         # 4. Verify COMPLETE status
@@ -1697,13 +1729,13 @@ class TestDismissEndpoint:
         resp_status = await client.get(f"/api/sessions/{session_id}/status")
         assert resp_status.json()["status"] == "reviewing"
 
-        # We can't easily manipulate internal session from HTTP tests alone,
-        # so test the 400 case for wrong state
+        # Dismiss is now allowed in any non-COMPLETE state,
+        # so fake-id returns 404 (issue not found) instead of 400
         resp = await client.post(
             f"/api/sessions/{session_id}/issues/fake-id/dismiss",
             json={"reasoning": "test"},
         )
-        assert resp.status_code == 400  # Cannot dismiss in reviewing state
+        assert resp.status_code == 404  # Issue not found
 
     @pytest.mark.asyncio
     async def test_dismiss_not_found(self, client, tmp_path):
@@ -1970,3 +2002,152 @@ class TestToonResponses:
         toon_data = toon_decode(toon_resp.text)
 
         assert toon_data == json_data
+
+
+class TestFinishValidation:
+    """Tests for finish endpoint unresolved-issue validation gate."""
+
+    async def _create_session_with_issues(self, client, tmp_path, *, num_issues=1):
+        """Helper: create session → submit review with issues → process."""
+        resp = await client.post("/api/sessions", json={
+            "base": "main", "repo_path": str(tmp_path), "head": "test-branch",
+        })
+        sid = resp.json()["session_id"]
+        issues = [
+            {"title": f"Issue {i}", "severity": "high", "file": f"f{i}.py", "description": f"desc {i}"}
+            for i in range(num_issues)
+        ]
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "reviewer-a", "issues": issues,
+        })
+        await client.post(f"/api/sessions/{sid}/process")
+        return sid
+
+    @pytest.mark.asyncio
+    async def test_finish_rejects_unresolved(self, app, client, tmp_path):
+        """Unresolved REPORTED issues → 409 + auto FIXING transition."""
+        sid = await self._create_session_with_issues(client, tmp_path)
+        resp = await client.post(f"/api/sessions/{sid}/finish")
+        assert resp.status_code == 409
+        data = resp.json()
+        assert data["unresolved_count"] == 1
+        assert len(data["unresolved_issues"]) == 1
+        assert data["unresolved_issues"][0]["progress_status"] == "reported"
+
+        status = (await client.get(f"/api/sessions/{sid}/status")).json()
+        assert status["status"] == "fixing"
+
+    @pytest.mark.asyncio
+    async def test_finish_force_overrides(self, client, tmp_path):
+        """Same unresolved issues + force=true → 200, COMPLETE."""
+        sid = await self._create_session_with_issues(client, tmp_path)
+        resp = await client.post(f"/api/sessions/{sid}/finish?force=true")
+        assert resp.status_code == 200
+
+        status = (await client.get(f"/api/sessions/{sid}/status")).json()
+        assert status["status"] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_finish_all_resolved_completed(self, app, client, tmp_path):
+        """All issues COMPLETED → 200, COMPLETE."""
+        from ai_review.models import IssueProgressStatus
+        sid = await self._create_session_with_issues(client, tmp_path)
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        for issue in session.issues:
+            issue.progress_status = IssueProgressStatus.COMPLETED
+        manager.persist()
+
+        resp = await client.post(f"/api/sessions/{sid}/finish")
+        assert resp.status_code == 200
+        assert (await client.get(f"/api/sessions/{sid}/status")).json()["status"] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_finish_all_resolved_wont_fix(self, app, client, tmp_path):
+        """All issues WONT_FIX → 200, COMPLETE."""
+        from ai_review.models import IssueProgressStatus
+        sid = await self._create_session_with_issues(client, tmp_path)
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        for issue in session.issues:
+            issue.progress_status = IssueProgressStatus.WONT_FIX
+        manager.persist()
+
+        resp = await client.post(f"/api/sessions/{sid}/finish")
+        assert resp.status_code == 200
+        assert (await client.get(f"/api/sessions/{sid}/status")).json()["status"] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_finish_dismissed_passes(self, app, client, tmp_path):
+        """All issues consensus=dismissed → 200, COMPLETE."""
+        sid = await self._create_session_with_issues(client, tmp_path)
+        manager = app.state.manager
+        session = manager.get_session(sid)
+
+        # Submit enough no_fix opinions to reach dismissed consensus (threshold=2)
+        for issue in session.issues:
+            for model_id in ["voter-1", "voter-2", "voter-3"]:
+                manager.submit_opinion(sid, issue.id, model_id, "no_fix", "not an issue", "low")
+
+        resp = await client.post(f"/api/sessions/{sid}/finish")
+        assert resp.status_code == 200
+        assert (await client.get(f"/api/sessions/{sid}/status")).json()["status"] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_finish_no_issues(self, client, tmp_path):
+        """No issues at all → 200, COMPLETE (backward compat)."""
+        resp = await client.post("/api/sessions", json={
+            "base": "main", "repo_path": str(tmp_path), "head": "test-branch",
+        })
+        sid = resp.json()["session_id"]
+
+        resp = await client.post(f"/api/sessions/{sid}/finish")
+        assert resp.status_code == 200
+        assert (await client.get(f"/api/sessions/{sid}/status")).json()["status"] == "complete"
+
+
+class TestGetUnresolvedIssues:
+    """Unit-level tests for get_unresolved_issues via API."""
+
+    @pytest.mark.asyncio
+    async def test_get_unresolved_filters(self, app, client, tmp_path):
+        """REPORTED/FIXED → included, COMPLETED/WONT_FIX → excluded, dismissed → excluded."""
+        from ai_review.models import IssueProgressStatus
+        resp = await client.post("/api/sessions", json={
+            "base": "main", "repo_path": str(tmp_path), "head": "test-branch",
+        })
+        sid = resp.json()["session_id"]
+        await client.post(f"/api/sessions/{sid}/reviews", json={
+            "model_id": "a",
+            "issues": [
+                {"title": "Reported", "severity": "high", "file": "a.py", "description": "d"},
+                {"title": "Fixed", "severity": "medium", "file": "b.py", "description": "d"},
+                {"title": "Completed", "severity": "low", "file": "c.py", "description": "d"},
+                {"title": "WontFix", "severity": "high", "file": "d.py", "description": "d"},
+                {"title": "Dismissed", "severity": "medium", "file": "e.py", "description": "d"},
+            ],
+        })
+        await client.post(f"/api/sessions/{sid}/process")
+
+        manager = app.state.manager
+        session = manager.get_session(sid)
+        issues = sorted(session.issues, key=lambda i: i.title)
+        # Completed
+        issues[0].progress_status = IssueProgressStatus.COMPLETED
+        # Dismissed
+        issues[1].consensus_type = "dismissed"
+        # Fixed (still unresolved — needs verification)
+        issues[2].progress_status = IssueProgressStatus.FIXED
+        # Reported (default — unresolved)
+        # issues[3] stays REPORTED
+        # WontFix
+        issues[4].progress_status = IssueProgressStatus.WONT_FIX
+        manager.persist()
+
+        unresolved = manager.get_unresolved_issues(sid)
+        titles = {u["title"] for u in unresolved}
+        assert "Reported" in titles
+        assert "Fixed" in titles
+        assert "Completed" not in titles
+        assert "WontFix" not in titles
+        assert "Dismissed" not in titles

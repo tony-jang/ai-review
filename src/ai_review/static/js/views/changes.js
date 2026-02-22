@@ -238,14 +238,15 @@ function _renderIssueComment(issue, extraLineHtml) {
   const timeStr = _findReviewTime(issue);
   const displayNo = state.issueNumberById[issue.id] || 0;
 
-  const resolved = issue.progress_status && issue.progress_status !== 'reported';
+  const resolved = issue.progress_status === 'completed' || issue.progress_status === 'wont_fix';
   let html = `<div class="diff-inline-thread-item${resolved ? ' collapsed' : ''}" id="inline-issue-${_escapeAttr(issue.id)}" data-issue-id="${_escapeAttr(issue.id)}" style="border-left:3px solid ${sevColor}">`;
   // Agent header
   html += '<div class="diff-inline-thread-agent">';
   html += `<div class="diff-inline-avatar" style="background:${raisedColor}">${_modelInitial(raisedBy)}</div>`;
   html += `<span class="diff-inline-agent-name" style="color:${raisedColor}">${esc(raisedBy)}</span>`;
-  html += '<span class="diff-inline-bot-badge">Reviewer</span>';
+  html += '<span class="diff-inline-bot-badge reporter-badge">Reviewer · Reporter</span>';
   if (timeStr) html += `<span class="diff-inline-time">${esc(timeStr)}</span>`;
+  if (displayNo) html += `<button class="issue-menu-btn" onclick="event.stopPropagation();showIssueMenu(event,'${_escapeAttr(state.sessionId)}',${displayNo})" title="이슈 메뉴">⋯</button>`;
   html += '</div>';
   // Severity + number + title
   html += '<div class="diff-inline-thread-header">';
@@ -269,21 +270,32 @@ function _renderIssueComment(issue, extraLineHtml) {
     discussions.forEach(op => {
       if (_isStatusChangeAction(op.action)) {
         const opColor = getModelColor(op.model_id || '');
+        const _isAuthor = op.model_id !== issue.raised_by;
+        const _roleBadge = _isAuthor
+          ? '<span class="action-badge" style="background:rgba(245,158,11,0.12);color:#F59E0B">Author</span>'
+          : '<span class="action-badge" style="background:rgba(99,102,241,0.12);color:#818CF8">Reviewer</span>';
         html += `<div class="status-change-log">
           <span class="status-change-arrow">&rarr;</span>
           <span class="model-dot" style="background:${opColor};width:8px;height:8px"></span>
-          <span>${esc(op.reasoning || '')}</span>
+          <span class="status-change-author" style="color:${opColor}">${esc(op.model_id || '')}</span>
+          ${_roleBadge}
+          ${op.status_value
+            ? (op.previous_status
+              ? `가 상태를 ${progressBadgeHtml(op.previous_status)} 에서 ${progressBadgeHtml(op.status_value)} 로 변경했습니다.`
+              : `가 상태를 ${progressBadgeHtml(op.status_value)} (으)로 변경했습니다.`)
+            : esc(op.reasoning || '')}
         </div>`;
         return;
       }
       const opColor = getModelColor(op.model_id || '');
       const actionLabel = ACTION_LABELS[op.action] || op.action;
       const actionClass = _reviewerActionClass(op.action);
+      const isOpReporter = op.model_id === issue.raised_by;
       html += '<div class="diff-inline-opinion-block">';
       html += '<div class="diff-inline-opinion-header">';
       html += `<div class="diff-inline-avatar diff-inline-avatar-sm" style="background:${opColor}">${_modelInitial(op.model_id)}</div>`;
       html += `<span class="diff-inline-agent-name" style="color:${opColor}">${esc(op.model_id || '')}</span>`;
-      html += '<span class="diff-inline-bot-badge">Reviewer</span>';
+      html += `<span class="diff-inline-bot-badge${isOpReporter ? ' reporter-badge' : ''}">Reviewer${isOpReporter ? ' · Reporter' : ''}</span>`;
       html += `<span class="diff-inline-opinion-action ${actionClass}">${esc(actionLabel)}</span>`;
       html += '</div>';
       html += `<div class="diff-inline-opinion-body">${renderMd(op.reasoning || '')}</div>`;

@@ -31,14 +31,15 @@ function _renderAvatar(modelId, color, isLast) {
   return html;
 }
 
-function _renderCardHeader(modelId, color, agent, timeStr, extraHtml, { toggleIssueId } = {}) {
+function _renderCardHeader(modelId, color, agent, timeStr, extraHtml, { toggleIssueId, isReporter, issueDisplayNo } = {}) {
   const onclick = toggleIssueId ? ` onclick="toggleConvIssue('${_escapeAttr(toggleIssueId)}')"` : '';
   let html = `<div class="conv-tl-card-header"${onclick}>`;
   html += `<span class="tl-agent-name" style="color:${color}">${esc(modelId)}</span>`;
-  html += '<span class="tl-bot-badge">Reviewer</span>';
+  html += `<span class="tl-bot-badge${isReporter ? ' reporter-badge' : ''}">Reviewer${isReporter ? ' · Reporter' : ''}</span>`;
   if (agent?.role) html += `<span class="tl-role">${esc(agent.role)}</span>`;
   if (extraHtml) html += `<span class="tl-extra">${extraHtml}</span>`;
   html += `<span class="tl-time">${esc(timeStr)}</span>`;
+  if (issueDisplayNo) html += `<button class="issue-menu-btn" onclick="event.stopPropagation();showIssueMenu(event,'${_escapeAttr(state.sessionId)}',${issueDisplayNo})" title="이슈 메뉴">⋯</button>`;
   if (toggleIssueId) html += '<span class="conv-issue-caret">▾</span>';
   html += '</div>';
   return html;
@@ -76,9 +77,9 @@ function _renderIssueCard(issue, review, color, agent, isLast) {
   let html = '<div class="conv-tl-item">';
   html += _renderAvatar(review.model_id, color, isLast);
   html += '<div class="conv-tl-content">';
-  const resolved = issue.progress_status && issue.progress_status !== 'reported';
+  const resolved = issue.progress_status === 'completed' || issue.progress_status === 'wont_fix';
   html += `<div class="conv-tl-card tl-issue-card${resolved ? ' conv-collapsed' : ''}" id="conv-card-${issue.id}" style="border-left-color:${sevColor}">`;
-  html += _renderCardHeader(review.model_id, color, agent, timeStr, progressBadgeHtml(issue.progress_status), { toggleIssueId: issue.id });
+  html += _renderCardHeader(review.model_id, color, agent, timeStr, progressBadgeHtml(issue.progress_status), { toggleIssueId: issue.id, isReporter: true, issueDisplayNo: displayNo });
   html += '<div class="conv-tl-card-body">';
 
   // Issue head: severity + number + title + goto
@@ -111,21 +112,32 @@ function _renderIssueCard(issue, review, color, agent, isLast) {
     discussions.forEach(op => {
       if (_isStatusChangeAction(op.action)) {
         const opColor = getModelColor(op.model_id || '');
+        const _isAuthor = op.model_id !== issue.raised_by;
+        const _roleBadge = _isAuthor
+          ? '<span class="action-badge" style="background:rgba(245,158,11,0.12);color:#F59E0B">Author</span>'
+          : '<span class="action-badge" style="background:rgba(99,102,241,0.12);color:#818CF8">Reviewer</span>';
         html += `<div class="status-change-log">
           <span class="status-change-arrow">&rarr;</span>
           <span class="model-dot" style="background:${opColor};width:8px;height:8px"></span>
-          <span>${esc(op.reasoning || '')}</span>
+          <span class="status-change-author" style="color:${opColor}">${esc(op.model_id || '')}</span>
+          ${_roleBadge}
+          ${op.status_value
+            ? (op.previous_status
+              ? `가 상태를 ${progressBadgeHtml(op.previous_status)} 에서 ${progressBadgeHtml(op.status_value)} 로 변경했습니다.`
+              : `가 상태를 ${progressBadgeHtml(op.status_value)} (으)로 변경했습니다.`)
+            : esc(op.reasoning || '')}
         </div>`;
         return;
       }
       const opColor = getModelColor(op.model_id || '');
       const actionLabel = ACTION_LABELS[op.action] || op.action;
       const actionClass = _reviewerActionClass(op.action);
+      const isOpReporter = op.model_id === issue.raised_by;
       html += '<div class="diff-inline-opinion-block">';
       html += '<div class="diff-inline-opinion-header">';
       html += `<div class="diff-inline-avatar diff-inline-avatar-sm" style="background:${opColor}">${_modelInitial(op.model_id)}</div>`;
       html += `<span class="diff-inline-agent-name" style="color:${opColor}">${esc(op.model_id || '')}</span>`;
-      html += '<span class="diff-inline-bot-badge">Reviewer</span>';
+      html += `<span class="diff-inline-bot-badge${isOpReporter ? ' reporter-badge' : ''}">Reviewer${isOpReporter ? ' · Reporter' : ''}</span>`;
       html += `<span class="diff-inline-opinion-action ${actionClass}">${esc(actionLabel)}</span>`;
       html += '</div>';
       html += `<div class="diff-inline-opinion-body">${renderMd(op.reasoning || '')}</div>`;

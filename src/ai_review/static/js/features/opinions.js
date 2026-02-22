@@ -85,10 +85,22 @@ export async function finishReview() {
   btn.disabled = true; btn.textContent = '완료 중...';
   try {
     const r = await fetch(`/api/sessions/${state.sessionId}/finish`, {method:'POST'});
+    if (r.status === 409) {
+      const data = await r.json();
+      const list = data.unresolved_issues.map(
+        i => `  - [${i.progress_status}] ${i.title} (${i.file})`
+      ).join('\n');
+      if (confirm(`미해결 이슈 ${data.unresolved_count}건:\n${list}\n\n강제로 완료하시겠습니까?`)) {
+        const r2 = await fetch(`/api/sessions/${state.sessionId}/finish?force=true`, {method:'POST'});
+        if (!r2.ok) { const e = await r2.json(); alert(e.detail||'오류'); return; }
+        window.showReport(await r2.json());
+        await window.pollStatus();
+      }
+      return;
+    }
     if (!r.ok) { const e = await r.json(); alert(e.detail||'오류가 발생했습니다'); return; }
-    const report = await r.json();
-    window.showReport(report);
+    window.showReport(await r.json());
     await window.pollStatus();
   } catch(e) { alert('완료에 실패했습니다'); }
-  btn.disabled = false; btn.textContent = '리뷰 완료';
+  finally { btn.disabled = false; btn.textContent = '리뷰 완료'; }
 }

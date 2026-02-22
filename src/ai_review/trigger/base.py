@@ -18,6 +18,7 @@ class TriggerResult:
     output: str = ""
     error: str = ""
     client_session_id: str = ""
+    command: str = ""
 
 
 class TriggerEngine(abc.ABC):

@@ -125,14 +125,38 @@ export function selectIssue(id, { push = true } = {}) {
   state.selectedFileDiff = null;
   if (state.sessionId && id) uiState._uiSelectedIssueBySession[state.sessionId] = id;
   _uiSaveStateToStorage();
-  // Navigate to Changes tab and scroll to the issue's inline comment
-  const issue = state.issues.find(i => i.id === id);
-  if (issue && issue.file) {
-    window.scrollToFileInChanges(issue.file, issue.line_start || issue.line || 0, issue.id, { push: false });
+
+  // Stay on current tab: scroll to the issue within that tab
+  if (state.mainTab === 'conversation') {
+    _scrollToConvIssue(id);
   } else {
-    window.switchMainTab('changes', { push: false });
+    const issue = state.issues.find(i => i.id === id);
+    if (issue && issue.file) {
+      window.scrollToFileInChanges(issue.file, issue.line_start || issue.line || 0, issue.id, { push: false });
+    } else {
+      window.switchMainTab('changes', { push: false });
+    }
   }
   if (push) window.router.push({ sessionId: state.sessionId, issueId: id });
+}
+
+function _scrollToConvIssue(issueId) {
+  const card = document.getElementById('conv-card-' + issueId);
+  if (!card) return;
+  // Expand if collapsed
+  card.classList.remove('conv-collapsed');
+  const container = document.getElementById('main-tab-content');
+  if (container) {
+    const top = card.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 8;
+    container.scrollTo({ top, behavior: 'smooth' });
+  } else {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  // Flash highlight
+  card.classList.remove('issue-item-flash');
+  void card.offsetWidth;
+  card.classList.add('issue-item-flash');
+  setTimeout(() => card.classList.remove('issue-item-flash'), 1050);
 }
 
 export function renderIssueFilterOptions() {

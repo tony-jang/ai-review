@@ -30,14 +30,15 @@ export async function _nsmRefreshPresets(preserveSelection = true) {
 
   _nsmPresetList = list;
   const ids = _nsmPresetList.map(p => p.id);
+  const enabledIds = _nsmPresetList.filter(p => p.enabled !== false).map(p => p.id);
   const idSet = new Set(ids);
 
   if (!preserveSelection) {
-    _nsmSelectedPresetIds = [...ids];
+    _nsmSelectedPresetIds = [...enabledIds];
   } else {
     let selected = prev.filter(id => idSet.has(id));
-    if (!prev.length && ids.length) selected = [...ids];
-    if (prev.length && !selected.length && ids.length) selected = [...ids];
+    if (!prev.length && ids.length) selected = [...enabledIds];
+    if (prev.length && !selected.length && ids.length) selected = [...enabledIds];
     _nsmSelectedPresetIds = selected;
   }
 

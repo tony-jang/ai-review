@@ -7,6 +7,7 @@ import json
 import os
 import logging
 import re
+import shlex
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -88,6 +89,8 @@ class GeminiTrigger(TriggerEngine):
                 "json",
             ]
 
+        command_str = shlex.join(args)
+
         try:
             env = dict(os.environ)
             env.update(self.env_vars)
@@ -118,6 +121,7 @@ class GeminiTrigger(TriggerEngine):
                         success=False,
                         error=f"gemini CLI timed out after {int(self._timeout_seconds)}s",
                         client_session_id=client_session_id,
+                        command=command_str,
                     )
 
                 if result.success and not resume_session:
@@ -125,6 +129,7 @@ class GeminiTrigger(TriggerEngine):
                     if extracted:
                         self._sessions[model_id] = extracted
 
+                result.command = command_str
                 return result
             finally:
                 self._procs.discard(proc)
@@ -133,12 +138,14 @@ class GeminiTrigger(TriggerEngine):
                 success=False,
                 error="gemini CLI not found. Install Gemini CLI first.",
                 client_session_id=client_session_id,
+                command=command_str,
             )
         except Exception as e:
             return TriggerResult(
                 success=False,
                 error=str(e),
                 client_session_id=client_session_id,
+                command=command_str,
             )
 
     async def _read_with_early_fail(

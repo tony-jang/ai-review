@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from ai_review.models import AgentState, AgentStatus, DiffFile, IssueResponseAction, ModelConfig, OpinionAction, SessionStatus, Severity, _utcnow
+from ai_review.models import AgentState, AgentStatus, DiffFile, IssueProgressStatus, IssueResponseAction, ModelConfig, OpinionAction, SessionStatus, Severity, _utcnow
 from ai_review.session_manager import SessionManager
 
 
@@ -567,6 +567,7 @@ class TestFalsePositiveWithdraw:
         assert issue.consensus is True
         assert issue.consensus_type == "closed"
         assert issue.final_severity == Severity.DISMISSED
+        assert issue.progress_status == IssueProgressStatus.WONT_FIX
 
 
 class TestGetPendingIssues:
@@ -1803,6 +1804,11 @@ class TestDismissIssue:
         manager.sessions[session.id] = session
         transition(session, SessionStatus.COLLECTING)
         transition(session, SessionStatus.REVIEWING)
+        transition(session, SessionStatus.DEDUP)
+        transition(session, SessionStatus.DELIBERATING)
+        transition(session, SessionStatus.FIXING)
+        transition(session, SessionStatus.VERIFYING)
+        transition(session, SessionStatus.COMPLETE)
         issue = Issue(
             title="Bug", severity=Severity.HIGH, file="x.py",
             description="d", consensus=True, consensus_type="fix_required",
@@ -1855,7 +1861,8 @@ class TestPersistDebounce:
         """persist() with no running event loop writes synchronously."""
         monkeypatch.chdir(tmp_path)
         mgr = SessionManager()
-        # Default presets are persisted during __init__
+        assert not mgr._state_file.exists()
+        mgr.persist()
         assert mgr._state_file.exists()
 
     @pytest.mark.asyncio

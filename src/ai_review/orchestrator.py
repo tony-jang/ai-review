@@ -469,12 +469,11 @@ class Orchestrator:
                 "prompt_preview": prompt[:200],
             })
 
-        session_triggers = self._triggers.get(session_id, {})
-        trigger = session_triggers.get(mc.id)
-        if not trigger:
+        result = self._ensure_trigger(session_id, mc.id)
+        if result is None:
             return
+        trigger, client_sid = result
 
-        client_sid = session.client_sessions.get(mc.id)
         if not client_sid:
             client_sid = await trigger.create_session(mc.id)
             session.client_sessions[mc.id] = client_sid
@@ -545,12 +544,11 @@ class Orchestrator:
                     "prompt_preview": prompt[:200],
                 })
 
-            session_triggers = self._triggers.get(session_id, {})
-            trigger = session_triggers.get(mc.id)
-            if not trigger:
+            result = self._ensure_trigger(session_id, mc.id)
+            if result is None:
                 continue
+            trigger, client_sid = result
 
-            client_sid = session.client_sessions.get(mc.id)
             if not client_sid:
                 client_sid = await trigger.create_session(mc.id)
                 session.client_sessions[mc.id] = client_sid
@@ -641,11 +639,9 @@ class Orchestrator:
                 "phase_change", {"status": "dedup", "session_id": session_id}
             )
 
-        # Create issues + dedup
-        if not session.issues:
-            issues = self.manager.create_issues_from_reviews(session_id)
-            deduped = deduplicate_issues(issues)
-            session.issues = deduped
+        # Ensure any remaining reviews are materialized as issues
+        self.manager.create_issues_from_reviews(session_id)
+        session.issues = deduplicate_issues(session.issues)
 
         apply_consensus(
             session.issues, session.config.consensus_threshold,
@@ -719,12 +715,11 @@ class Orchestrator:
                     },
                 )
 
-            session_triggers = self._triggers.get(session_id, {})
-            trigger = session_triggers.get(mc.id)
-            if not trigger:
+            result = self._ensure_trigger(session_id, mc.id)
+            if result is None:
                 continue
+            trigger, client_sid = result
 
-            client_sid = session.client_sessions.get(mc.id)
             if not client_sid:
                 client_sid = await trigger.create_session(mc.id)
                 session.client_sessions[mc.id] = client_sid
@@ -784,12 +779,11 @@ class Orchestrator:
                 "prompt_preview": prompt[:200],
             })
 
-        session_triggers = self._triggers.get(session_id, {})
-        trigger = session_triggers.get(mc.id)
-        if not trigger:
+        result = self._ensure_trigger(session_id, mc.id)
+        if result is None:
             return
+        trigger, client_sid = result
 
-        client_sid = session.client_sessions.get(mc.id)
         if not client_sid:
             client_sid = await trigger.create_session(mc.id)
             session.client_sessions[mc.id] = client_sid
@@ -901,6 +895,19 @@ class Orchestrator:
                 exc,
                 exc_info=exc,
             )
+
+    def _ensure_trigger(self, session_id: str, model_id: str) -> tuple[TriggerEngine, str] | None:
+        """Get or recreate trigger for a model. Returns (trigger, client_session_id) or None."""
+        session = self.manager.get_session(session_id)
+        mc = next((m for m in session.config.models if m.id == model_id and m.enabled), None)
+        if mc is None:
+            return None
+        session_triggers = self._triggers.setdefault(session_id, {})
+        trigger = session_triggers.get(model_id)
+        if trigger is None:
+            trigger = self._create_trigger(mc.client_type)
+            session_triggers[model_id] = trigger
+        return trigger, session.client_sessions.get(model_id, "")
 
     def _create_trigger(self, client_type: str) -> TriggerEngine:
         """Factory for trigger engines."""

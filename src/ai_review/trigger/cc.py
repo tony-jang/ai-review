@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -110,6 +111,7 @@ class ClaudeCodeTrigger(TriggerEngine):
         if model_config and model_config.model_id:
             args.extend(["--model", model_config.model_id])
         args.extend(["-p", prompt])
+        command_str = shlex.join(args)
 
         try:
             env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -125,7 +127,9 @@ class ClaudeCodeTrigger(TriggerEngine):
             )
             self._procs.add(proc)
             try:
-                return await self._read_stream(proc, client_session_id, model_id, is_resume)
+                result = await self._read_stream(proc, client_session_id, model_id, is_resume)
+                result.command = command_str
+                return result
             finally:
                 self._procs.discard(proc)
         except FileNotFoundError:
@@ -133,12 +137,14 @@ class ClaudeCodeTrigger(TriggerEngine):
                 success=False,
                 error="claude CLI not found. Install Claude Code first.",
                 client_session_id=client_session_id,
+                command=command_str,
             )
         except Exception as e:
             return TriggerResult(
                 success=False,
                 error=str(e),
                 client_session_id=client_session_id,
+                command=command_str,
             )
 
     async def _read_stream(

@@ -47,18 +47,18 @@ _urlencode() { python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.
 _resolve_body() { if [[ "${1:-}" == "-" ]]; then cat; else printf '%s' "$1"; fi; }
 
 # Session-scoped helpers
-_get()   { curl -sf "${_auth[@]}" "$ARV_BASE/$1"; }
-_post()  { curl -sf -X POST "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$ARV_BASE/$1"; }
-_post0() { curl -sf -X POST "${_auth[@]}" "$ARV_BASE/$1"; }
-_put()   { curl -sf -X PUT "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$ARV_BASE/$1"; }
-_del()   { curl -sf -X DELETE "${_auth[@]}" "$ARV_BASE/$1"; }
-_del0()  { curl -sf -X DELETE "${_auth[@]}" "$ARV_BASE"; }
+_get()   { curl -s --fail-with-body "${_auth[@]}" "$ARV_BASE/$1"; }
+_post()  { curl -s --fail-with-body -X POST "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$ARV_BASE/$1"; }
+_post0() { curl -s --fail-with-body -X POST "${_auth[@]}" "$ARV_BASE/$1"; }
+_put()   { curl -s --fail-with-body -X PUT "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$ARV_BASE/$1"; }
+_del()   { curl -s --fail-with-body -X DELETE "${_auth[@]}" "$ARV_BASE/$1"; }
+_del0()  { curl -s --fail-with-body -X DELETE "${_auth[@]}" "$ARV_BASE"; }
 
 # Server-scoped helpers
-_sget()  { curl -sf "${_auth[@]}" "$_API_ROOT/$1"; }
-_spost() { curl -sf -X POST "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$_API_ROOT/$1"; }
-_sput()  { curl -sf -X PUT "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$_API_ROOT/$1"; }
-_sdel()  { curl -sf -X DELETE "${_auth[@]}" "$_API_ROOT/$1"; }
+_sget()  { curl -s --fail-with-body "${_auth[@]}" "$_API_ROOT/$1"; }
+_spost() { curl -s --fail-with-body -X POST "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$_API_ROOT/$1"; }
+_sput()  { curl -s --fail-with-body -X PUT "${_auth[@]}" "${_json_ct[@]}" -d "$2" "$_API_ROOT/$1"; }
+_sdel()  { curl -s --fail-with-body -X DELETE "${_auth[@]}" "$_API_ROOT/$1"; }
 
 # ============================================================
 # GET commands
@@ -338,7 +338,20 @@ cmd_status() {
 # ============================================================
 # POST: finish / start / activate (no body)
 # ============================================================
-cmd_finish()   { _post0 "finish"; }
+cmd_finish() {
+  local force=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force="true"; shift ;;
+      *) shift ;;
+    esac
+  done
+  if [[ -n "$force" ]]; then
+    _post0 "finish?force=true"
+  else
+    _post0 "finish"
+  fi
+}
 cmd_start()    { _post0 "start"; }
 cmd_activate() { _post0 "activate"; }
 
@@ -630,7 +643,7 @@ case "$main_cmd" in
   respond)      cmd_respond "$@" ;;
   dismiss)      cmd_dismiss "$@" ;;
   status)       cmd_status "$@" ;;
-  finish)       cmd_finish ;;
+  finish)       cmd_finish "$@" ;;
   start)        cmd_start ;;
   activate)     cmd_activate ;;
   fix-complete) cmd_fix_complete "$@" ;;

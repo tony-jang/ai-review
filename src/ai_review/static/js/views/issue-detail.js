@@ -124,22 +124,34 @@ export async function renderIssueDetail() {
       timeline.forEach((op, idx) => {
         if (_isStatusChangeAction(op.action)) {
           const mColor = getModelColor(op.model_id);
+          const _isAuthor = op.model_id !== issue.raised_by;
+          const _roleBadge = _isAuthor
+            ? '<span class="action-badge" style="background:rgba(245,158,11,0.12);color:#F59E0B">Author</span>'
+            : '<span class="action-badge" style="background:rgba(99,102,241,0.12);color:#818CF8">Reviewer</span>';
           html += `<div class="status-change-log">
             <span class="status-change-arrow">&rarr;</span>
             <span class="model-dot" style="background:${mColor};width:8px;height:8px"></span>
-            <span>${esc(op.reasoning || '')}</span>
+            <span class="status-change-author" style="color:${mColor}">${esc(op.model_id || '')}</span>
+            ${_roleBadge}
+            ${op.status_value
+              ? (op.previous_status
+                ? `가 상태를 ${progressBadgeHtml(op.previous_status)} 에서 ${progressBadgeHtml(op.status_value)} 로 변경했습니다.`
+                : `가 상태를 ${progressBadgeHtml(op.status_value)} (으)로 변경했습니다.`)
+              : esc(op.reasoning || '')}
             <span class="status-change-time">${op.timestamp ? esc(formatTs(op.timestamp)) : ''}</span>
           </div>`;
           return;
         }
         const mColor = getModelColor(op.model_id);
         const actionClass = 'action-'+op.action;
+        const isReporter = op.model_id === issue.raised_by;
         const rk = `tl-${issue.id}-${idx}`;
         html += `<div class="timeline-item" data-op-model="${_escapeAttr(op.model_id || '')}" data-op-time="${_escapeAttr(op.timestamp || '')}" data-op-action="${_escapeAttr(op.action || '')}">
           <div class="timeline-head">
             <span class="model-dot" style="background:${mColor}"></span>
             <span class="model-name" style="color:${mColor}">${esc(op.model_id)}</span>
             <span class="action-badge ${actionClass}">${actLabel(op.action)}</span>
+            ${isReporter ? '<span class="action-badge" style="background:rgba(245,158,11,0.12);color:#F59E0B">Reporter</span>' : ''}
             ${op.turn != null ? `<span class="severity-badge" style="background:#6B728020;color:#8B949E">턴 ${op.turn}</span>` : ''}
             <span class="timeline-time">${op.timestamp ? esc(formatTs(op.timestamp)) : ''}</span>
           </div>
@@ -158,22 +170,34 @@ export async function renderIssueDetail() {
     discussionThread.forEach((op, idx) => {
       if (_isStatusChangeAction(op.action)) {
         const mColor = getModelColor(op.model_id);
+        const _isAuthor = op.model_id !== issue.raised_by;
+        const _roleBadge = _isAuthor
+          ? '<span class="action-badge" style="background:rgba(245,158,11,0.12);color:#F59E0B">Author</span>'
+          : '<span class="action-badge" style="background:rgba(99,102,241,0.12);color:#818CF8">Reviewer</span>';
         html += `<div class="status-change-log">
           <span class="status-change-arrow">&rarr;</span>
           <span class="model-dot" style="background:${mColor};width:8px;height:8px"></span>
-          <span>${esc(op.reasoning || '')}</span>
+          <span class="status-change-author" style="color:${mColor}">${esc(op.model_id || '')}</span>
+          ${_roleBadge}
+          ${op.status_value
+            ? (op.previous_status
+              ? `가 상태를 ${progressBadgeHtml(op.previous_status)} 에서 ${progressBadgeHtml(op.status_value)} 로 변경했습니다.`
+              : `가 상태를 ${progressBadgeHtml(op.status_value)} (으)로 변경했습니다.`)
+            : esc(op.reasoning || '')}
           <span class="status-change-time">${op.timestamp ? esc(formatTs(op.timestamp)) : ''}</span>
         </div>`;
         return;
       }
       const mColor = getModelColor(op.model_id);
       const actionClass = 'action-'+op.action;
+      const isReporter = op.model_id === issue.raised_by;
       const rk = `th-${issue.id}-${idx}`;
       html += `<div class="opinion" ${op.id ? `id="op-${_escapeAttr(op.id)}"` : ''} data-op-model="${_escapeAttr(op.model_id || '')}" data-op-time="${_escapeAttr(op.timestamp || '')}" data-op-action="${_escapeAttr(op.action || '')}">
         <div class="opinion-header">
           <span class="model-dot" style="background:${mColor}"></span>
           <span class="model-name" style="color:${mColor}">${esc(op.model_id)}</span>
           <span class="action-badge ${actionClass}">${actLabel(op.action)}</span>
+          ${isReporter ? '<span class="action-badge" style="background:rgba(245,158,11,0.12);color:#F59E0B">Reporter</span>' : ''}
           ${op.suggested_severity?`<span class="severity-badge" style="background:${SEVERITY_COLORS[op.suggested_severity]||'#6B7280'}20;color:${SEVERITY_COLORS[op.suggested_severity]||'#6B7280'}">${sevLabel(op.suggested_severity)}</span>`:''}
           ${op.timestamp ? `<span class="opinion-time">${esc(formatTs(op.timestamp))}</span>` : ''}
         </div>

@@ -1,6 +1,6 @@
 // Agent Manager Modal
 
-import { REVIEW_PRESETS, STRICTNESS_OPTIONS, AGENT_FIELD_HELP, MODEL_DEFAULT_HINTS, AGENT_PRESETS } from '../constants.js';
+import { STRICTNESS_OPTIONS, AGENT_FIELD_HELP, MODEL_DEFAULT_HINTS, AGENT_PRESETS, providerIconSvg } from '../constants.js';
 import { esc, _escapeAttr, getModelColor } from '../utils.js';
 import state from '../state.js';
 
@@ -104,11 +104,14 @@ export async function openAgentManager(editModelId) {
   _amOverlay.addEventListener('click', (e) => { if (e.target === _amOverlay) _amRequestClose(); });
   _amSetDirty(false);
 
-  _amRenderList(presets);
-
   if (editModelId) {
     _amSelectedAgentId = editModelId;
     _amMode = 'edit';
+  }
+
+  _amRenderList(presets);
+
+  if (editModelId) {
     _amRenderEditForm(presets.find(a => a.id === editModelId), presets);
   }
 }
@@ -168,13 +171,6 @@ function _amRenderEditForm(mc, agents) {
       </div>
 
       <div>
-        ${_amLabel('빠른 설정', '포커스/프롬프트를 빠르게 채웁니다.')}
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          ${REVIEW_PRESETS.map(rp => `<button class="btn" onclick="_amApplyPreset('${rp.key}')" style="font-size:11px;padding:4px 10px">${rp.icon} ${rp.label}</button>`).join('')}
-        </div>
-      </div>
-
-      <div>
         ${_amLabel('설명', AGENT_FIELD_HELP.description)}
         <input id="am-description" value="${esc(mc.description || '')}" style="${inputStyle}" placeholder="에이전트 설명">
       </div>
@@ -195,9 +191,12 @@ function _amRenderEditForm(mc, agents) {
       <div style="display:flex;gap:8px">
         <div style="flex:1">
           ${_amLabel('클라이언트 타입', AGENT_FIELD_HELP.client_type)}
-          <select id="am-client-type" style="${inputStyle}" onchange="_amOnClientTypeChange()">
-            ${['claude-code','codex','opencode','gemini'].map(t => `<option value="${t}" ${clientType === t ? 'selected' : ''}>${t}</option>`).join('')}
-          </select>
+          <div class="client-type-select-wrap">
+            <span id="am-client-type-icon" class="client-type-icon">${providerIconSvg(clientType, 16)}</span>
+            <select id="am-client-type" style="${inputStyle};padding-left:32px" onchange="_amOnClientTypeChange()">
+              ${['claude-code','codex','opencode','gemini'].map(t => `<option value="${t}" ${clientType === t ? 'selected' : ''}>${t}</option>`).join('')}
+            </select>
+          </div>
         </div>
         <div style="flex:1">
           ${_amLabel('세부 모델', AGENT_FIELD_HELP.model_id)}
@@ -241,37 +240,24 @@ function _amRenderEditForm(mc, agents) {
         </div>
       </div>
 
-      <div>
-        ${_amLabel('연결 테스트 Endpoint (자동)', AGENT_FIELD_HELP.test_endpoint)}
-        <div id="am-test-target" class="field-hint"></div>
-        <div style="margin-top:6px">
-          <button class="btn" type="button" onclick="_amTestConnection('edit', this)">연결 테스트</button>
-        </div>
-        <div id="am-test-result" class="conn-test-result"></div>
-      </div>
-
       <div class="am-action-footer">
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
-          <input type="checkbox" id="am-enabled" ${mc.enabled !== false ? 'checked' : ''} style="accent-color:var(--accent)">
-          활성화
-        </label>
-        <button class="btn btn-primary" onclick="_amSaveAgent('${esc(mc.id)}')" style="padding:8px 24px">저장</button>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn" type="button" onclick="_amTestConnection('edit', this)">연결 테스트</button>
+          <span id="am-test-status" class="conn-test-status"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="am-enabled" ${mc.enabled !== false ? 'checked' : ''} style="accent-color:var(--accent)">
+            활성화
+          </label>
+          <button class="btn btn-primary" onclick="_amSaveAgent('${esc(mc.id)}')" style="padding:8px 24px">저장</button>
+        </div>
       </div>
     </div>`;
   _amUpdateStrictnessUI();
   _amRefreshModelHint('edit');
   _amRefreshConnectionHint('edit');
   _amBindDirtyTracking();
-}
-
-export function _amApplyPreset(key) {
-  const rp = REVIEW_PRESETS.find(r => r.key === key);
-  if (!rp) return;
-  const focusEl = document.getElementById('am-review-focus');
-  const promptEl = document.getElementById('am-system-prompt');
-  if (focusEl) focusEl.value = rp.review_focus.join(', ');
-  if (promptEl) promptEl.value = rp.system_prompt;
-  _amSetDirty(true);
 }
 
 export function _amUpdateStrictnessUI() {
@@ -290,6 +276,8 @@ export function _amOnClientTypeChange() {
   const ct = document.getElementById('am-client-type')?.value || 'claude-code';
   const providerRow = document.getElementById('am-provider-row');
   if (providerRow) providerRow.style.display = ct === 'opencode' ? '' : 'none';
+  const iconEl = document.getElementById('am-client-type-icon');
+  if (iconEl) iconEl.innerHTML = providerIconSvg(ct, 16);
   // Update model dropdown
   const modelSelect = document.getElementById('am-model-id-select');
   if (modelSelect) {
@@ -366,14 +354,84 @@ export async function _amDeleteAgent(modelId) {
   } catch (e) { alert('삭제 실패'); }
 }
 
+function _amDismissPopover() {
+  _amOverlay?.querySelector('.preset-catalog-popover')?.remove();
+}
+
 export function _amShowAddPanel(force = false) {
+  // Toggle: if popover already open, close it
+  const existing = _amOverlay?.querySelector('.preset-catalog-popover');
+  if (existing) { existing.remove(); return; }
+
   if (!force && !_amConfirmDiscardChanges('프리셋 추가 화면으로 이동')) return;
+
+  // Group presets by group field
+  const groups = [];
+  const groupMap = {};
+  AGENT_PRESETS.forEach((p, i) => {
+    const g = p.group || 'Other';
+    if (!groupMap[g]) { groupMap[g] = { name: g, clientType: p.client_type, items: [] }; groups.push(groupMap[g]); }
+    groupMap[g].items.push({ preset: p, flatIndex: i });
+  });
+
+  const popover = document.createElement('div');
+  popover.className = 'preset-catalog-popover';
+  popover.innerHTML = `
+    ${groups.map(g => `
+      <div class="preset-catalog-group">
+        <div class="preset-catalog-header"><span class="preset-catalog-icon">${providerIconSvg(g.clientType, 14)}</span> ${esc(g.name)}</div>
+        ${g.items.map(({ preset: p, flatIndex: fi }) => `
+          <div class="preset-catalog-item" data-preset-index="${fi}">
+            <span class="preset-catalog-icon">${providerIconSvg(p.client_type, 16)}</span>
+            <span class="preset-catalog-color" style="background:${p.color}"></span>
+            <span>${esc(p.label)}</span>
+            <span class="preset-catalog-model">${esc(p.model_id || '')}</span>
+          </div>`).join('')}
+      </div>`).join('')}
+    <div class="preset-catalog-group">
+      <div class="preset-catalog-item preset-catalog-custom" data-preset-index="-1">
+        <span class="preset-catalog-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" class="provider-icon"><path d="M19.14 12.94a7.07 7.07 0 0 0 .06-.94 7.07 7.07 0 0 0-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.04 7.04 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54a7.04 7.04 0 0 0-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.48.48 0 0 0 .12.61l2.03 1.58a7.07 7.07 0 0 0-.06.94c0 .31.02.63.06.94L2.86 14.52a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.04.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54a7.04 7.04 0 0 0 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg></span>
+        <span>커스텀</span>
+        <span class="preset-catalog-model">직접 설정</span>
+      </div>
+    </div>`;
+
+  popover.addEventListener('click', (e) => {
+    const item = e.target.closest('.preset-catalog-item');
+    if (!item) return;
+    const idx = parseInt(item.dataset.presetIndex, 10);
+    _amDismissPopover();
+    _amBeginAddPreset(idx);
+  });
+
+  // Attach to .report-card and position relative to the button
+  const card = _amOverlay?.querySelector('.report-card');
+  const btn = _amOverlay?.querySelector('[onclick*="_amShowAddPanel"]');
+  if (card && btn) {
+    card.style.position = 'relative';
+    const cardRect = card.getBoundingClientRect();
+    const btnRect = btn.getBoundingClientRect();
+    popover.style.left = `${btnRect.left - cardRect.left - 4}px`;
+    popover.style.bottom = `${cardRect.bottom - btnRect.top + 6}px`;
+    card.appendChild(popover);
+  }
+
+  // Close popover when clicking outside
+  const onClickOutside = (e) => {
+    if (!popover.contains(e.target) && !e.target.closest('[onclick*="_amShowAddPanel"]')) {
+      _amDismissPopover();
+      document.removeEventListener('click', onClickOutside, true);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', onClickOutside, true), 0);
+}
+
+function _amBeginAddPreset(presetIdx) {
   _amSelectedAgentId = null;
   _amMode = 'add';
-  // Update left list selection
+  // De-select visually in left list
   try {
     const listEl = _amOverlay?.querySelector('#am-agent-list');
-    // Just de-select visually
     if (listEl) {
       listEl.querySelectorAll('[onclick^="_amSelectAgent"]').forEach(el => {
         el.style.background = 'transparent';
@@ -384,22 +442,14 @@ export function _amShowAddPanel(force = false) {
 
   const right = _amOverlay?.querySelector('#am-right');
   if (!right) return;
-  const inputStyle = 'background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;font-family:inherit;width:100%';
-
   right.innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
       <h3 style="font-size:14px;font-weight:600">프리셋 추가</h3>
       <span id="am-dirty-indicator" class="am-dirty-indicator" style="display:none">저장 안 됨</span>
     </div>
-    <div style="margin-bottom:16px">
-      <label style="font-size:11px;color:var(--text-muted);margin-bottom:6px;display:block">클라이언트 프리셋</label>
-      <div class="preset-grid" style="grid-template-columns:repeat(3,1fr);gap:8px">
-        ${AGENT_PRESETS.map((p, i) => `<div class="preset-card" onclick="_amSelectAddPreset(${i})" style="padding:12px 8px"><span class="preset-icon" style="font-size:20px">${p.icon}</span><span class="preset-label" style="font-size:12px">${p.label}</span></div>`).join('')}
-        <div class="preset-card preset-card-custom" onclick="_amSelectAddPreset(-1)" style="padding:12px 8px"><span class="preset-icon" style="font-size:20px">⚙️</span><span class="preset-label" style="font-size:12px">커스텀</span></div>
-      </div>
-    </div>
-    <div id="am-add-form" style="display:none"></div>`;
+    <div id="am-add-form"></div>`;
   _amSetDirty(false);
+  _amSelectAddPreset(presetIdx);
 }
 
 export function _amSelectAddPreset(presetIdx) {
@@ -409,7 +459,9 @@ export function _amSelectAddPreset(presetIdx) {
   const defaultId = preset ? window.getUniqueAgentId(preset.id) : '';
   const defaultColor = preset ? preset.color : '#8B5CF6';
   const defaultClientType = preset ? preset.client_type : 'claude-code';
-  const showProvider = isCustom || (preset && preset.needsProvider);
+  const defaultModelId = preset?.model_id || '';
+  const defaultProvider = preset?.provider || '';
+  const showProvider = defaultClientType === 'opencode' || isCustom;
   const models = _amAvailableModels[defaultClientType] || [];
 
   const form = _amOverlay?.querySelector('#am-add-form');
@@ -420,13 +472,6 @@ export function _amSelectAddPreset(presetIdx) {
       <div>
         ${_amLabel('에이전트 ID', '중복되지 않는 고유 ID입니다. 예: codex, gemini-sec')}
         <input id="am-new-id" value="${esc(defaultId)}" placeholder="id (예: codex2)" style="${inputStyle}">
-      </div>
-
-      <div>
-        ${_amLabel('빠른 설정', '포커스/프롬프트를 빠르게 채웁니다.')}
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          ${REVIEW_PRESETS.map(rp => `<button class="btn" onclick="_amApplyNewPreset('${rp.key}')" style="font-size:11px;padding:4px 10px">${rp.icon} ${rp.label}</button>`).join('')}
-        </div>
       </div>
 
       <div>
@@ -450,17 +495,20 @@ export function _amSelectAddPreset(presetIdx) {
       <div style="display:flex;gap:8px">
         <div style="flex:1">
           ${_amLabel('클라이언트 타입', AGENT_FIELD_HELP.client_type)}
-          <select id="am-new-client-type" style="${inputStyle}" ${!isCustom ? 'disabled' : ''} onchange="_amOnNewClientTypeChange()">
-            ${['claude-code','codex','opencode','gemini'].map(t => `<option value="${t}" ${defaultClientType === t ? 'selected' : ''}>${t}</option>`).join('')}
-          </select>
+          <div class="client-type-select-wrap">
+            <span id="am-new-client-type-icon" class="client-type-icon">${providerIconSvg(defaultClientType, 16)}</span>
+            <select id="am-new-client-type" style="${inputStyle};padding-left:32px" ${!isCustom ? 'disabled' : ''} onchange="_amOnNewClientTypeChange()">
+              ${['claude-code','codex','opencode','gemini'].map(t => `<option value="${t}" ${defaultClientType === t ? 'selected' : ''}>${t}</option>`).join('')}
+            </select>
+          </div>
         </div>
         <div style="flex:1">
           ${_amLabel('세부 모델', AGENT_FIELD_HELP.model_id)}
           <select id="am-new-model-id-select" style="${inputStyle}" onchange="document.getElementById('am-new-model-id').value=this.value">
             <option value="">기본값 (클라이언트 설정)</option>
-            ${models.map(m => `<option value="${m.model_id}">${m.label}</option>`).join('')}
+            ${models.map(m => `<option value="${m.model_id}" ${defaultModelId === m.model_id ? 'selected' : ''}>${m.label}</option>`).join('')}
           </select>
-          <input id="am-new-model-id" value="" placeholder="또는 직접 입력" style="${inputStyle};margin-top:4px;font-size:11px">
+          <input id="am-new-model-id" value="${esc(defaultModelId)}" placeholder="또는 직접 입력" style="${inputStyle};margin-top:4px;font-size:11px">
           <div id="am-new-model-default-hint" class="field-hint"></div>
           <div class="field-hint">프리셋은 일부만 노출됩니다. 필요한 모델은 직접 입력하세요.</div>
         </div>
@@ -468,7 +516,7 @@ export function _amSelectAddPreset(presetIdx) {
 
       <div id="am-new-provider-row" style="${showProvider ? '' : 'display:none'}">
         ${_amLabel('Provider', AGENT_FIELD_HELP.provider)}
-        <input id="am-new-provider" placeholder="provider (예: openai)" style="${inputStyle}">
+        <input id="am-new-provider" value="${esc(defaultProvider)}" placeholder="provider (예: openai)" style="${inputStyle}">
       </div>
 
       <div>
@@ -481,7 +529,7 @@ export function _amSelectAddPreset(presetIdx) {
 
       <div>
         ${_amLabel('시스템 프롬프트', AGENT_FIELD_HELP.system_prompt)}
-        <textarea id="am-new-system-prompt" rows="2" placeholder="시스템 프롬프트 (선택)" style="${inputStyle};resize:vertical"></textarea>
+        <textarea id="am-new-system-prompt" rows="4" style="${inputStyle};resize:vertical">${esc(preset?.system_prompt || '')}</textarea>
       </div>
 
       <div style="display:flex;gap:8px">
@@ -496,31 +544,18 @@ export function _amSelectAddPreset(presetIdx) {
         </div>
       </div>
 
-      <div>
-        ${_amLabel('연결 테스트 Endpoint (자동)', AGENT_FIELD_HELP.test_endpoint)}
-        <div id="am-new-test-target" class="field-hint"></div>
-        <div style="margin-top:6px">
+      <div class="am-action-footer">
+        <div style="display:flex;align-items:center;gap:8px">
           <button class="btn" type="button" onclick="_amTestConnection('new', this)">연결 테스트</button>
+          <span id="am-new-test-status" class="conn-test-status"></span>
         </div>
-        <div id="am-new-test-result" class="conn-test-result"></div>
+        <button class="btn btn-primary" onclick="_amSubmitNewAgent(this)" style="padding:8px 24px">추가</button>
       </div>
-
-      <button class="btn btn-primary" onclick="_amSubmitNewAgent(this)" style="align-self:flex-end;padding:8px 24px">추가</button>
     </div>`;
   _amUpdateNewStrictnessUI();
   _amRefreshModelHint('new');
   _amRefreshConnectionHint('new');
   _amBindDirtyTracking();
-}
-
-export function _amApplyNewPreset(key) {
-  const rp = REVIEW_PRESETS.find(r => r.key === key);
-  if (!rp) return;
-  const focusEl = document.getElementById('am-new-review-focus');
-  const promptEl = document.getElementById('am-new-system-prompt');
-  if (focusEl) focusEl.value = rp.review_focus.join(', ');
-  if (promptEl) promptEl.value = rp.system_prompt;
-  _amSetDirty(true);
 }
 
 export function _amUpdateNewStrictnessUI() {
@@ -539,6 +574,8 @@ export function _amOnNewClientTypeChange() {
   const ct = document.getElementById('am-new-client-type')?.value || 'claude-code';
   const providerRow = document.getElementById('am-new-provider-row');
   if (providerRow) providerRow.style.display = ct === 'opencode' ? '' : 'none';
+  const iconEl = document.getElementById('am-new-client-type-icon');
+  if (iconEl) iconEl.innerHTML = providerIconSvg(ct, 16);
   const modelSelect = document.getElementById('am-new-model-id-select');
   if (modelSelect) {
     const models = _amAvailableModels[ct] || [];
@@ -549,35 +586,100 @@ export function _amOnNewClientTypeChange() {
 }
 
 function _amRenderConnectionTestDetail(data) {
-  const detail = {
+  const trigger = data?.trigger || {};
+  const command = trigger.command || '';
+  const output = trigger.output || '';
+  const error = trigger.error || '';
+  const prompt = data?.prompt || '';
+  const hasResult = data?.type === 'result';
+
+  let sections = '';
+
+  // Status badge
+  if (!hasResult) {
+    const label = command ? '에이전트 완료, 콜백 대기 중...' : '에이전트 응답 대기 중...';
+    sections += `<div class="conn-test-section"><span class="conn-test-label">Status</span><pre class="conn-test-code conn-test-pending">${esc(label)}</pre></div>`;
+  } else if (data.ok) {
+    sections += `<div class="conn-test-section"><span class="conn-test-label">Status</span><pre class="conn-test-code" style="color:var(--severity-dismissed)">성공 — 콜백 수신 완료</pre></div>`;
+  } else {
+    sections += `<div class="conn-test-section"><span class="conn-test-label">Status</span><pre class="conn-test-code conn-test-error">${esc(data.reason || data.status || '실패')}</pre></div>`;
+  }
+
+  if (command) {
+    sections += `<div class="conn-test-section"><span class="conn-test-label">Command</span><pre class="conn-test-code">${esc(command)}</pre></div>`;
+  }
+
+  if (output) {
+    sections += `<div class="conn-test-section"><span class="conn-test-label">Output</span><pre class="conn-test-code">${esc(output.length > 2000 ? output.slice(0, 2000) + '...' : output)}</pre></div>`;
+  }
+
+  if (error) {
+    sections += `<div class="conn-test-section"><span class="conn-test-label">Error</span><pre class="conn-test-code conn-test-error">${esc(error.length > 2000 ? error.slice(0, 2000) + '...' : error)}</pre></div>`;
+  }
+
+  if (prompt) {
+    sections += `<div class="conn-test-section"><span class="conn-test-label">Prompt</span><pre class="conn-test-code">${esc(prompt)}</pre></div>`;
+  }
+
+  const meta = {
     status: data?.status || '',
     elapsed_ms: data?.elapsed_ms ?? null,
-    reason: data?.reason || data?.detail || '',
     test_token: data?.test_token || '',
     session_marker: data?.session_marker || '',
     callback: data?.callback || null,
-    trigger: data?.trigger || null,
   };
-  return `<details class="conn-test-detail"><summary>상세 보기</summary><pre class="conn-test-json">${esc(JSON.stringify(detail, null, 2))}</pre></details>`;
+  sections += `<div class="conn-test-section"><span class="conn-test-label">Meta</span><pre class="conn-test-json">${esc(JSON.stringify(meta, null, 2))}</pre></div>`;
+
+  return `<div class="conn-test-detail">${sections}</div>`;
+}
+
+let _amConnTestDetailData = null;
+
+function _amRefreshFloatBody() {
+  const body = document.querySelector('#conn-test-float .conn-test-float-body');
+  if (body && _amConnTestDetailData) {
+    body.innerHTML = _amRenderConnectionTestDetail(_amConnTestDetailData);
+  }
+}
+
+export function _amShowConnTestDetail() {
+  if (!_amConnTestDetailData) return;
+  const existing = document.getElementById('conn-test-float');
+  if (existing) { existing.remove(); return; }
+
+  const float = document.createElement('div');
+  float.id = 'conn-test-float';
+  float.className = 'conn-test-float';
+  float.innerHTML = `<div class="conn-test-float-header"><span>연결 테스트 상세</span><button class="conn-test-float-close" onclick="document.getElementById('conn-test-float')?.remove()">&times;</button></div><div class="conn-test-float-body">${_amRenderConnectionTestDetail(_amConnTestDetailData)}</div>`;
+  (_amOverlay || document.body).appendChild(float);
+}
+
+function _amSetTestStatus(statusEl, cls, text) {
+  if (!statusEl) return;
+  const detailBtn = ` <button class="btn conn-test-detail-btn" onclick="_amShowConnTestDetail()">상세</button>`;
+  statusEl.className = 'conn-test-status ' + cls;
+  statusEl.innerHTML = esc(text) + detailBtn;
 }
 
 export async function _amTestConnection(mode, btn) {
   const isNew = mode === 'new';
   const prefix = isNew ? 'am-new' : 'am';
-  const resultEl = document.getElementById(`${prefix}-test-result`);
+  const statusEl = document.getElementById(`${prefix}-test-status`);
   const clientType = document.getElementById(`${prefix}-client-type`)?.value || 'claude-code';
   const provider = (document.getElementById(`${prefix}-provider`)?.value || '').trim();
   const modelId = (document.getElementById(`${prefix}-model-id`)?.value || '').trim();
 
   if (btn) btn.disabled = true;
+  document.getElementById('conn-test-float')?.remove();
+  _amConnTestDetailData = { status: 'pending' };
+
   const startTime = Date.now();
   let timerInterval = null;
-  if (resultEl) {
-    resultEl.className = 'conn-test-result';
-    resultEl.textContent = '테스트 중... 0초';
+  if (statusEl) {
+    _amSetTestStatus(statusEl, '', '테스트 중... 0초');
     timerInterval = setInterval(() => {
       const sec = Math.floor((Date.now() - startTime) / 1000);
-      resultEl.textContent = `테스트 중... ${sec}초`;
+      _amSetTestStatus(statusEl, '', `테스트 중... ${sec}초`);
     }, 1000);
   }
 
@@ -587,30 +689,52 @@ export async function _amTestConnection(mode, btn) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ client_type: clientType, provider, model_id: modelId, timeout_seconds: 60 }),
     });
-    const data = await r.json();
     if (!r.ok) {
-      if (resultEl) {
-        resultEl.className = 'conn-test-result fail';
-        resultEl.innerHTML = `${esc(data.detail || '연결 테스트 실패')}${_amRenderConnectionTestDetail(data)}`;
-      }
+      const data = await r.json();
+      _amConnTestDetailData = data;
+      _amRefreshFloatBody();
+      _amSetTestStatus(statusEl, 'fail', data.detail || '연결 테스트 실패');
       return;
     }
-    if (data.ok) {
-      if (resultEl) {
-        const elapsed = data.elapsed_ms != null ? `${(data.elapsed_ms / 1000).toFixed(1)}초` : '-';
-        resultEl.className = 'conn-test-result ok';
-        resultEl.innerHTML = `${esc(`성공 (${elapsed}) · 콜백 수신 완료`)}${_amRenderConnectionTestDetail(data)}`;
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+
+        if (ev.type === 'started') {
+          _amConnTestDetailData = { ...(_amConnTestDetailData || {}), ...ev, status: 'pending' };
+          _amRefreshFloatBody();
+        } else if (ev.type === 'trigger_done') {
+          _amConnTestDetailData = { ...(_amConnTestDetailData || {}), ...ev };
+          _amRefreshFloatBody();
+        } else if (ev.type === 'result') {
+          _amConnTestDetailData = { ...(_amConnTestDetailData || {}), ...ev };
+          _amRefreshFloatBody();
+          if (ev.ok) {
+            const elapsed = ev.elapsed_ms != null ? `${(ev.elapsed_ms / 1000).toFixed(1)}초` : '-';
+            _amSetTestStatus(statusEl, 'ok', `성공 (${elapsed})`);
+          } else {
+            const reason = ev.reason || ev.status || '연결 실패';
+            _amSetTestStatus(statusEl, 'fail', `실패: ${reason}`);
+          }
+        }
       }
-    } else if (resultEl) {
-      resultEl.className = 'conn-test-result fail';
-      const reason = data.reason || data.error || data.status || '연결 실패';
-      resultEl.innerHTML = `${esc(`실패: ${reason}`)}${_amRenderConnectionTestDetail(data)}`;
     }
   } catch (e) {
-    if (resultEl) {
-      resultEl.className = 'conn-test-result fail';
-      resultEl.innerHTML = `${esc(`요청 실패: ${e.message}`)}${_amRenderConnectionTestDetail({ reason: e.message, status: 'request_error' })}`;
-    }
+    _amConnTestDetailData = { reason: e.message, status: 'request_error' };
+    _amRefreshFloatBody();
+    _amSetTestStatus(statusEl, 'fail', `요청 실패: ${e.message}`);
   } finally {
     if (timerInterval) clearInterval(timerInterval);
     if (btn) btn.disabled = false;
