@@ -35,6 +35,13 @@ class IssueResponseAction(str, enum.Enum):
     PARTIAL = "partial"
 
 
+class IssueProgressStatus(str, enum.Enum):
+    REPORTED = "reported"
+    WONT_FIX = "wont_fix"
+    FIXED = "fixed"
+    COMPLETED = "completed"
+
+
 class OpinionAction(str, enum.Enum):
     RAISE = "raise"
     FIX_REQUIRED = "fix_required"
@@ -42,6 +49,7 @@ class OpinionAction(str, enum.Enum):
     COMMENT = "comment"
     FALSE_POSITIVE = "false_positive"
     WITHDRAW = "withdraw"
+    STATUS_CHANGE = "status_change"
 
     # Backward compatibility aliases
     @classmethod
@@ -119,6 +127,7 @@ class Opinion(BaseModel):
     confidence: float = 1.0
     turn: int = 0
     mentions: list[str] = Field(default_factory=list)
+    status_value: str | None = None  # action=STATUS_CHANGE일 때만 사용
     timestamp: datetime = Field(default_factory=_utcnow)
 
 
@@ -151,6 +160,7 @@ class Issue(BaseModel):
     final_severity: Severity | None = None
     turn: int = 0
     assist_messages: list[AssistMessage] = Field(default_factory=list)
+    progress_status: IssueProgressStatus = IssueProgressStatus.REPORTED
 
 
 # --- Session Config ---

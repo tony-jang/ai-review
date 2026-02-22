@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,23 +22,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_NESTED_CMDS = frozenset({"get", "session", "preset", "agent"})
+
+
 def _parse_arv_activity(cmd: str) -> tuple[str, str]:
     """Parse arv subcommand into a specific (action, target) pair.
 
     Examples:
-        "arv get file /src/main.py" → ("arv_get_file", "/src/main.py")
-        "arv report -n title -s high ..." → ("arv_report", "-n title -s high ...")
-        "arv opinion iss-1 -a fix_required" → ("arv_opinion", "iss-1 -a fix_required")
+        "arv get file /src/main.py"          → ("arv_get_file", "/src/main.py")
+        "arv report -n title -s high ..."    → ("arv_report", "-n title -s high ...")
+        "arv opinion iss-1 -a fix_required"  → ("arv_opinion", "iss-1 -a fix_required")
+        "arv session create --base main ..." → ("arv_session_create", "--base main ...")
+        "arv preset list"                    → ("arv_preset_list", "")
+        "arv finish"                         → ("arv_finish", "")
     """
     parts = cmd.split()
     # parts[0] == "arv"
     if len(parts) < 2:
         return ("arv", cmd)
     sub = parts[1]
-    if sub == "get" and len(parts) >= 3:
+    if sub in _NESTED_CMDS and len(parts) >= 3:
         resource = parts[2]
         rest = " ".join(parts[3:]) if len(parts) > 3 else ""
-        return (f"arv_get_{resource}", rest)
+        return (f"arv_{sub}_{resource}", rest)
     rest = " ".join(parts[2:]) if len(parts) > 2 else ""
     return (f"arv_{sub}", rest)
 
@@ -69,8 +76,16 @@ class ClaudeCodeTrigger(TriggerEngine):
         self._sessions: dict[str, str] = {}  # model_id -> cc session_id
         self._procs: set[asyncio.subprocess.Process] = set()
 
+    @staticmethod
+    def _is_cc_session_id(value: str) -> bool:
+        """Return True if *value* is a real Claude Code session ID (UUID format)."""
+        return bool(re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            value or "",
+        ))
+
     async def create_session(self, model_id: str) -> str:
-        """Create a CC session ID (each call is independent, no --resume)."""
+        """Create a placeholder session ID (replaced with real CC session ID after first prompt)."""
         session_id = uuid.uuid4().hex[:12]
         self._sessions[model_id] = session_id
         return session_id
@@ -80,6 +95,9 @@ class ClaudeCodeTrigger(TriggerEngine):
         *, model_config: ModelConfig | None = None,
     ) -> TriggerResult:
         """Run claude -p <prompt> with stream-json output for real-time activity tracking."""
+        cc_session_id = self._sessions.get(model_id, "")
+        is_resume = self._is_cc_session_id(cc_session_id)
+
         args = [
             "claude",
             "--print",
@@ -87,6 +105,8 @@ class ClaudeCodeTrigger(TriggerEngine):
             "--verbose",
             "--allowedTools", "Bash(arv *) Write Read Grep Glob",
         ]
+        if is_resume:
+            args.extend(["--resume", cc_session_id])
         if model_config and model_config.model_id:
             args.extend(["--model", model_config.model_id])
         args.extend(["-p", prompt])
@@ -105,7 +125,7 @@ class ClaudeCodeTrigger(TriggerEngine):
             )
             self._procs.add(proc)
             try:
-                return await self._read_stream(proc, client_session_id)
+                return await self._read_stream(proc, client_session_id, model_id, is_resume)
             finally:
                 self._procs.discard(proc)
         except FileNotFoundError:
@@ -123,6 +143,7 @@ class ClaudeCodeTrigger(TriggerEngine):
 
     async def _read_stream(
         self, proc: asyncio.subprocess.Process, client_session_id: str,
+        model_id: str = "", is_resume: bool = False,
     ) -> TriggerResult:
         """Parse stream-json output line by line, invoking on_activity for tool_use events."""
         stderr_task = asyncio.create_task(self._drain_stderr(proc))
@@ -152,9 +173,13 @@ class ClaudeCodeTrigger(TriggerEngine):
                             except Exception:
                                 pass  # Never break the stream for callback errors
 
-            # Capture result text
+            # Capture result text and session ID
             if event_type == "result":
                 result_text = event.get("result", "")
+                if not is_resume:
+                    extracted = event.get("session_id", "")
+                    if extracted and model_id:
+                        self._sessions[model_id] = extracted
 
         await proc.wait()
         stderr_output = await stderr_task

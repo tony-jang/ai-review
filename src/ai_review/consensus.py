@@ -46,6 +46,8 @@ def check_consensus(
     voters: set[str] = set()
 
     for op in issue.thread:
+        if op.action == OpinionAction.STATUS_CHANGE:
+            continue
         if op.model_id in voters:
             continue
         if op.action in (OpinionAction.FIX_REQUIRED, OpinionAction.RAISE):
@@ -72,6 +74,8 @@ def determine_consensus_type(issue: Issue) -> str:
     voters: set[str] = set()
 
     for op in issue.thread:
+        if op.action == OpinionAction.STATUS_CHANGE:
+            continue
         if op.model_id in voters:
             continue
         if op.action in (OpinionAction.FIX_REQUIRED, OpinionAction.RAISE):
@@ -102,6 +106,8 @@ def determine_final_severity(issue: Issue) -> Severity:
     voters: set[str] = set()
 
     for op in issue.thread:
+        if op.action == OpinionAction.STATUS_CHANGE:
+            continue
         if op.model_id in voters:
             continue
         voters.add(op.model_id)

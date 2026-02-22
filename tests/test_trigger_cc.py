@@ -51,8 +51,11 @@ def _make_proc(stdout_lines: list[str], stderr: str = "", returncode: int = 0):
     return proc
 
 
-def _result_line(text: str = "review done") -> str:
-    return json.dumps({"type": "result", "result": text})
+def _result_line(text: str = "review done", session_id: str = "") -> str:
+    event = {"type": "result", "result": text}
+    if session_id:
+        event["session_id"] = session_id
+    return json.dumps(event)
 
 
 def _assistant_tool_use(name: str, input_data: dict) -> str:
@@ -293,6 +296,7 @@ class TestExtractActivity:
 
 
 class TestParseArvActivity:
+    # --- existing get subcommands ---
     def test_get_file(self):
         assert _parse_arv_activity("arv get file /src/main.py") == ("arv_get_file", "/src/main.py")
 
@@ -320,6 +324,41 @@ class TestParseArvActivity:
     def test_get_confirmed(self):
         assert _parse_arv_activity("arv get confirmed") == ("arv_get_confirmed", "")
 
+    # --- new get subcommands ---
+    def test_get_status(self):
+        assert _parse_arv_activity("arv get status") == ("arv_get_status", "")
+
+    def test_get_issues(self):
+        assert _parse_arv_activity("arv get issues") == ("arv_get_issues", "")
+
+    def test_get_actionable(self):
+        assert _parse_arv_activity("arv get actionable") == ("arv_get_actionable", "")
+
+    def test_get_pending(self):
+        assert _parse_arv_activity("arv get pending") == ("arv_get_pending", "")
+
+    def test_get_report(self):
+        assert _parse_arv_activity("arv get report") == ("arv_get_report", "")
+
+    def test_get_agents(self):
+        assert _parse_arv_activity("arv get agents") == ("arv_get_agents", "")
+
+    def test_get_runtime(self):
+        assert _parse_arv_activity("arv get runtime claude-opus") == ("arv_get_runtime", "claude-opus")
+
+    def test_get_assist(self):
+        assert _parse_arv_activity("arv get assist iss-abc") == ("arv_get_assist", "iss-abc")
+
+    def test_get_sessions(self):
+        assert _parse_arv_activity("arv get sessions") == ("arv_get_sessions", "")
+
+    def test_get_presets(self):
+        assert _parse_arv_activity("arv get presets") == ("arv_get_presets", "")
+
+    def test_get_models(self):
+        assert _parse_arv_activity("arv get models") == ("arv_get_models", "")
+
+    # --- existing post commands ---
     def test_report(self):
         result = _parse_arv_activity("arv report -n title -s high --file src/a.py")
         assert result == ("arv_report", "-n title -s high --file src/a.py")
@@ -339,6 +378,68 @@ class TestParseArvActivity:
         result = _parse_arv_activity("arv ping http://localhost:3000/cb")
         assert result == ("arv_ping", "http://localhost:3000/cb")
 
+    # --- new post commands ---
+    def test_dismiss(self):
+        result = _parse_arv_activity("arv dismiss iss-1 -b reason")
+        assert result == ("arv_dismiss", "iss-1 -b reason")
+
+    def test_finish(self):
+        assert _parse_arv_activity("arv finish") == ("arv_finish", "")
+
+    def test_start(self):
+        assert _parse_arv_activity("arv start") == ("arv_start", "")
+
+    def test_activate(self):
+        assert _parse_arv_activity("arv activate") == ("arv_activate", "")
+
+    def test_fix_complete(self):
+        result = _parse_arv_activity("arv fix-complete -c abc123")
+        assert result == ("arv_fix-complete", "-c abc123")
+
+    def test_assist(self):
+        result = _parse_arv_activity("arv assist iss-1 -b help")
+        assert result == ("arv_assist", "iss-1 -b help")
+
+    def test_chat(self):
+        result = _parse_arv_activity("arv chat opus -b hello")
+        assert result == ("arv_chat", "opus -b hello")
+
+    def test_impl_context(self):
+        result = _parse_arv_activity("arv impl-context -b summary")
+        assert result == ("arv_impl-context", "-b summary")
+
+    # --- nested subcommands (session, preset, agent) ---
+    def test_session_list(self):
+        assert _parse_arv_activity("arv session list") == ("arv_session_list", "")
+
+    def test_session_create(self):
+        result = _parse_arv_activity("arv session create --base main --head feat")
+        assert result == ("arv_session_create", "--base main --head feat")
+
+    def test_session_delete(self):
+        assert _parse_arv_activity("arv session delete") == ("arv_session_delete", "")
+
+    def test_preset_list(self):
+        assert _parse_arv_activity("arv preset list") == ("arv_preset_list", "")
+
+    def test_preset_add(self):
+        result = _parse_arv_activity("arv preset add --id my-claude --client claude-code")
+        assert result == ("arv_preset_add", "--id my-claude --client claude-code")
+
+    def test_preset_delete(self):
+        assert _parse_arv_activity("arv preset delete my-claude") == ("arv_preset_delete", "my-claude")
+
+    def test_agent_list(self):
+        assert _parse_arv_activity("arv agent list") == ("arv_agent_list", "")
+
+    def test_agent_add(self):
+        result = _parse_arv_activity("arv agent add --id codex --client codex")
+        assert result == ("arv_agent_add", "--id codex --client codex")
+
+    def test_agent_remove(self):
+        assert _parse_arv_activity("arv agent remove codex") == ("arv_agent_remove", "codex")
+
+    # --- edge cases ---
     def test_bare_arv(self):
         assert _parse_arv_activity("arv") == ("arv", "arv")
 
@@ -349,6 +450,108 @@ class TestParseArvActivity:
 
         result = _extract_activity("Bash", {"command": "arv report -n Bug -s high --file x.py"})
         assert result == ("arv_report", "-n Bug -s high --file x.py")
+
+
+class TestIsCcSessionId:
+    def test_valid_uuid(self):
+        assert ClaudeCodeTrigger._is_cc_session_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890") is True
+
+    def test_placeholder_hex(self):
+        assert ClaudeCodeTrigger._is_cc_session_id("abcdef123456") is False
+
+    def test_empty(self):
+        assert ClaudeCodeTrigger._is_cc_session_id("") is False
+
+    def test_none(self):
+        assert ClaudeCodeTrigger._is_cc_session_id(None) is False
+
+    def test_uppercase_uuid(self):
+        assert ClaudeCodeTrigger._is_cc_session_id("A1B2C3D4-E5F6-7890-ABCD-EF1234567890") is True
+
+
+class TestSessionResume:
+    @pytest.mark.asyncio
+    async def test_session_id_extracted_from_result(self):
+        """First call extracts session_id from result event into _sessions."""
+        trigger = ClaudeCodeTrigger()
+        await trigger.create_session("opus")
+        real_uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+        lines = [_result_line("ok", session_id=real_uuid)]
+
+        async def fake_exec(*args, **kwargs):
+            return _make_proc(lines)
+
+        with patch("ai_review.trigger.cc.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            result = await trigger.send_prompt("sess1", "opus", "review")
+
+        assert result.success is True
+        assert trigger._sessions["opus"] == real_uuid
+        await trigger.close()
+
+    @pytest.mark.asyncio
+    async def test_followup_uses_resume(self):
+        """When _sessions has a real UUID, --resume is included and --allowedTools is still present."""
+        trigger = ClaudeCodeTrigger()
+        real_uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        trigger._sessions["opus"] = real_uuid
+        captured_args = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_args.extend(args)
+            return _make_proc([_result_line("ok", session_id=real_uuid)])
+
+        with patch("ai_review.trigger.cc.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            result = await trigger.send_prompt("sess1", "opus", "discuss")
+
+        assert result.success is True
+        assert "--resume" in captured_args
+        idx = captured_args.index("--resume")
+        assert captured_args[idx + 1] == real_uuid
+        # --allowedTools is still present
+        assert "--allowedTools" in captured_args
+        await trigger.close()
+
+    @pytest.mark.asyncio
+    async def test_session_id_not_overwritten_on_resume(self):
+        """On resume calls, _sessions keeps the original UUID (not overwritten)."""
+        trigger = ClaudeCodeTrigger()
+        real_uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        trigger._sessions["opus"] = real_uuid
+
+        # Result event contains a different session_id
+        different_uuid = "11111111-2222-3333-4444-555555555555"
+        lines = [_result_line("ok", session_id=different_uuid)]
+
+        async def fake_exec(*args, **kwargs):
+            return _make_proc(lines)
+
+        with patch("ai_review.trigger.cc.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            await trigger.send_prompt("sess1", "opus", "followup")
+
+        # Original UUID preserved because is_resume=True skips extraction
+        assert trigger._sessions["opus"] == real_uuid
+        await trigger.close()
+
+    @pytest.mark.asyncio
+    async def test_missing_session_id_graceful(self):
+        """If result has no session_id, placeholder stays (next call is also fresh)."""
+        trigger = ClaudeCodeTrigger()
+        placeholder = await trigger.create_session("opus")
+
+        lines = [_result_line("ok")]  # no session_id in result
+
+        async def fake_exec(*args, **kwargs):
+            return _make_proc(lines)
+
+        with patch("ai_review.trigger.cc.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            result = await trigger.send_prompt("sess1", "opus", "review")
+
+        assert result.success is True
+        # Placeholder is preserved
+        assert trigger._sessions["opus"] == placeholder
+        assert not ClaudeCodeTrigger._is_cc_session_id(placeholder)
+        await trigger.close()
 
 
 class TestClose:

@@ -43,6 +43,7 @@ class Orchestrator:
         manager.on_issue_responded = self._on_issue_responded
         manager.on_fix_completed = self._on_fix_completed
         manager.on_issue_dismissed = self._on_issue_dismissed
+        manager.on_issue_status_changed = self._on_issue_status_changed
 
     # --- Public API ---
 
@@ -152,6 +153,7 @@ class Orchestrator:
         self.manager.on_issue_responded = None
         self.manager.on_fix_completed = None
         self.manager.on_issue_dismissed = None
+        self.manager.on_issue_status_changed = None
         await self.manager.flush()
 
     async def stop_session(self, session_id: str) -> None:
@@ -415,6 +417,75 @@ class Orchestrator:
         dismissed_ids = {d.issue_id for d in session.dismissals}
         if all(i.id in dismissed_ids for i in fix_required):
             self._safe_fire_and_forget(self._finish(session_id), name=f"finish-{session_id[:8]}")
+
+    def _on_issue_status_changed(self, session_id: str, issue_id: str, new_status: str, author: str) -> None:
+        """Called after an issue's progress status changes. Triggers verification on 'fixed'."""
+        if new_status == "fixed":
+            self._safe_fire_and_forget(
+                self._trigger_fix_verification(session_id, issue_id),
+                name=f"fix-verify-{session_id[:8]}-{issue_id[:8]}",
+            )
+
+    async def _trigger_fix_verification(self, session_id: str, issue_id: str) -> None:
+        """Send a verification prompt to the original reporter of a single issue."""
+        session = self.manager.get_session(session_id)
+        issue = next((i for i in session.issues if i.id == issue_id), None)
+        if issue is None:
+            return
+
+        raiser_id = issue.raised_by
+        mc = next((m for m in session.config.models if m.id == raiser_id and m.enabled), None)
+        if mc is None:
+            return
+
+        agent_key = self.manager.ensure_agent_access_key(session_id, mc.id)
+        prompt = build_verification_prompt(
+            session_id=session_id,
+            model_config=mc,
+            api_base_url=self.api_base_url,
+            verification_round=session.verification_round,
+            agent_key=agent_key,
+            issue_ids=[issue_id],
+        )
+
+        # Update agent state
+        if mc.id in session.agent_states:
+            session.agent_states[mc.id].status = AgentStatus.REVIEWING
+            session.agent_states[mc.id].task_type = AgentTaskType.VERIFICATION
+            session.agent_states[mc.id].started_at = _utcnow()
+            session.agent_states[mc.id].submitted_at = None
+            session.agent_states[mc.id].prompt_preview = prompt[:200]
+            session.agent_states[mc.id].prompt_full = prompt
+            self.manager.update_agent_runtime(
+                session_id, mc.id,
+                reason="fix verification started",
+                output="", error="",
+            )
+            self.manager.broker.publish("agent_status", {
+                "session_id": session_id,
+                "model_id": mc.id,
+                "status": "reviewing",
+                "task_type": "verification",
+                "prompt_preview": prompt[:200],
+            })
+
+        session_triggers = self._triggers.get(session_id, {})
+        trigger = session_triggers.get(mc.id)
+        if not trigger:
+            return
+
+        client_sid = session.client_sessions.get(mc.id)
+        if not client_sid:
+            client_sid = await trigger.create_session(mc.id)
+            session.client_sessions[mc.id] = client_sid
+
+        session_tasks = self._pending_tasks.setdefault(session_id, [])
+        task = asyncio.create_task(
+            self._fire_trigger(session_id, trigger, client_sid, mc.id, prompt, model_config=mc),
+            name=f"fix-verify-{session_id[:8]}-{mc.id}",
+        )
+        session_tasks.append(task)
+        self.manager.persist()
 
     async def _start_verification(self, session_id: str) -> None:
         """Send verification prompts only to original reporters of fix_required issues."""

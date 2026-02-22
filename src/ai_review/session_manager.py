@@ -25,6 +25,7 @@ from ai_review.models import (
     ImplementationContext,
     Issue,
     IssueDismissal,
+    IssueProgressStatus,
     IssueResponse,
     IssueResponseAction,
     Knowledge,
@@ -68,6 +69,8 @@ class SessionManager:
         self.on_issue_responded: Callable[[str, str, str], Any] | None = None  # (session_id, issue_id, action)
         self.on_fix_completed: Callable[[str], Any] | None = None  # (session_id,)
         self.on_issue_dismissed: Callable[[str, str], Any] | None = None  # (session_id, issue_id)
+        self.on_issue_status_changed: Callable[[str, str, str, str], Any] | None = None
+        # (session_id, issue_id, new_status, author)
         self._load_state()
         self._ensure_default_presets()
 
@@ -1047,6 +1050,10 @@ class SessionManager:
             if issue.id == issue_id:
                 parsed_action = OpinionAction(action)
 
+                # STATUS_CHANGE는 직접 제출 불가 — change_issue_status() 전용
+                if parsed_action == OpinionAction.STATUS_CHANGE:
+                    raise ValueError("STATUS_CHANGE는 직접 제출할 수 없습니다")
+
                 # FALSE_POSITIVE validation: raiser cannot mark own issue
                 if parsed_action == OpinionAction.FALSE_POSITIVE:
                     if model_id == issue.raised_by:
@@ -1624,6 +1631,94 @@ class SessionManager:
             self.on_issue_dismissed(session_id, issue_id)
         self.persist()
         return {"status": "dismissed", "issue_id": issue_id}
+
+    # Valid progress status transitions
+    _AUTHOR_TRANSITIONS: dict[IssueProgressStatus, set[IssueProgressStatus]] = {
+        IssueProgressStatus.REPORTED: {IssueProgressStatus.FIXED, IssueProgressStatus.WONT_FIX},
+        IssueProgressStatus.WONT_FIX: {IssueProgressStatus.REPORTED},
+    }
+    _REVIEWER_TRANSITIONS: dict[IssueProgressStatus, set[IssueProgressStatus]] = {
+        IssueProgressStatus.FIXED: {IssueProgressStatus.COMPLETED, IssueProgressStatus.REPORTED},
+    }
+
+    _PROGRESS_STATUS_LABELS: dict[IssueProgressStatus, str] = {
+        IssueProgressStatus.REPORTED: "보고됨",
+        IssueProgressStatus.WONT_FIX: "수정 대상 미포함",
+        IssueProgressStatus.FIXED: "수정됨",
+        IssueProgressStatus.COMPLETED: "완료됨",
+    }
+
+    def change_issue_status(
+        self,
+        session_id: str,
+        issue_id: str,
+        new_status: str,
+        author: str = "human",
+        reasoning: str = "",
+    ) -> dict:
+        """Change the progress status of an issue.
+
+        Role determination: if author == issue.raised_by → reviewer transitions,
+        otherwise → author transitions.
+        """
+        session = self.get_session(session_id)
+        issue = next((i for i in session.issues if i.id == issue_id), None)
+        if issue is None:
+            raise KeyError(f"Issue not found: {issue_id}")
+
+        try:
+            target = IssueProgressStatus(new_status)
+        except ValueError:
+            valid = ", ".join(s.value for s in IssueProgressStatus)
+            raise ValueError(f"Invalid status: {new_status}. Valid: {valid}")
+
+        current = issue.progress_status
+
+        # Determine role
+        is_reviewer = author == issue.raised_by
+        allowed = self._REVIEWER_TRANSITIONS if is_reviewer else self._AUTHOR_TRANSITIONS
+        valid_targets = allowed.get(current, set())
+
+        if target not in valid_targets:
+            role_name = "reviewer" if is_reviewer else "author"
+            raise ValueError(
+                f"{role_name}는 {current.value} → {target.value} 전환을 할 수 없습니다"
+            )
+
+        # Update status
+        issue.progress_status = target
+
+        # Add STATUS_CHANGE opinion to thread
+        label = self._PROGRESS_STATUS_LABELS.get(target, target.value)
+        log_reasoning = reasoning or f"{author}가 상태를 {label}(으)로 변경했습니다"
+        opinion = Opinion(
+            model_id=author,
+            action=OpinionAction.STATUS_CHANGE,
+            reasoning=log_reasoning,
+            status_value=target.value,
+            turn=issue.turn,
+        )
+        issue.thread.append(opinion)
+
+        # SSE event
+        self.broker.publish("issue_status_changed", {
+            "session_id": session_id,
+            "issue_id": issue_id,
+            "new_status": target.value,
+            "author": author,
+        })
+
+        # Callback
+        if self.on_issue_status_changed is not None:
+            self.on_issue_status_changed(session_id, issue_id, target.value, author)
+
+        self.persist()
+        return {
+            "status": "changed",
+            "issue_id": issue_id,
+            "progress_status": target.value,
+            "previous_status": current.value,
+        }
 
     def get_actionable_issues(self, session_id: str) -> dict:
         """Return unresolved fix_required issues grouped by file."""

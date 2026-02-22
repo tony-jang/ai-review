@@ -54,13 +54,35 @@ def create_app(port: int = 3000) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async with mcp_http_app.lifespan(app):
-            yield
-            manager.broker.disconnect_all()
+            # Wrap uvicorn's SIGINT/SIGTERM handler to disconnect SSE
+            # clients *before* uvicorn's connection drain phase.
+            # Without this, uvicorn waits for SSE connections to close,
+            # but they only close when disconnect_all() is called in
+            # lifespan shutdown — which runs *after* the drain timeout.
+            import signal
+
+            _original = {}
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                _original[sig] = signal.getsignal(sig)
+
+            def _pre_shutdown(sig, frame):
+                manager.broker.disconnect_all()
+                orig = _original.get(sig)
+                if callable(orig):
+                    orig(sig, frame)
+
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(sig, _pre_shutdown)
+
             try:
-                await asyncio.wait_for(orchestrator.close(), timeout=3)
-            except asyncio.TimeoutError:
-                pass
-            await manager.flush()
+                yield
+            finally:
+                manager.broker.disconnect_all()
+                try:
+                    await asyncio.wait_for(orchestrator.close(), timeout=3)
+                except asyncio.TimeoutError:
+                    pass
+                await manager.flush()
 
     app = FastAPI(title="AI Review", version="0.1.0", lifespan=lifespan)
     app.state.manager = manager
@@ -1213,6 +1235,27 @@ def create_app(port: int = 3000) -> FastAPI:
             result = manager.dismiss_issue(
                 session_id, issue_id,
                 body.get("reasoning", ""), body.get("dismissed_by", ""),
+            )
+            return JSONResponse(result)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # ------------------------------------------------------------------
+    # Issue Progress Status
+    # ------------------------------------------------------------------
+
+    @app.post("/api/sessions/{session_id}/issues/{issue_id}/status")
+    async def api_change_issue_status(session_id: str, issue_id: str, request: Request):
+        body = await request.json()
+        try:
+            result = manager.change_issue_status(
+                session_id,
+                issue_id,
+                new_status=body["status"],
+                author=body.get("author", "human"),
+                reasoning=body.get("reasoning", ""),
             )
             return JSONResponse(result)
         except KeyError as e:

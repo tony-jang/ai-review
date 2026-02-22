@@ -33,12 +33,16 @@ class SSEBroker:
         self._queues.append(q)
         try:
             while True:
-                event = await q.get()
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
                 if event is None:
                     break
                 yield event
         finally:
-            self._queues.remove(q)
+            if q in self._queues:
+                self._queues.remove(q)
 
     def disconnect_all(self) -> None:
         for q in self._queues:

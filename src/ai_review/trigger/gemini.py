@@ -25,10 +25,15 @@ if TYPE_CHECKING:
 _FATAL_PATTERNS = re.compile(
     r"|".join([
         r"Tool execution denied by policy",
+        r"Cannot use both a positional prompt and the --prompt",
+    ]),
+)
+
+_CAPACITY_PATTERNS = re.compile(
+    r"|".join([
         r"RESOURCE_EXHAUSTED",
         r"No capacity available",
         r"exhausted your capacity",
-        r"Cannot use both a positional prompt and the --prompt",
     ]),
 )
 
@@ -36,10 +41,13 @@ _FATAL_PATTERNS = re.compile(
 class GeminiTrigger(TriggerEngine):
     """Trigger Gemini CLI via subprocess and resume existing sessions."""
 
-    def __init__(self, timeout_seconds: float = 600.0) -> None:
+    def __init__(
+        self, timeout_seconds: float = 600.0, capacity_timeout_seconds: float = 90.0,
+    ) -> None:
         self._close_wait_seconds = 2.0
         self._sessions: dict[str, str] = {}  # model_id -> gemini session id
         self._timeout_seconds = timeout_seconds
+        self._capacity_timeout_seconds = capacity_timeout_seconds
         self._procs: set[asyncio.subprocess.Process] = set()
 
     async def create_session(self, model_id: str) -> str:
@@ -140,6 +148,16 @@ class GeminiTrigger(TriggerEngine):
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
         fatal_error: str | None = None
+        capacity_timer: asyncio.Task[None] | None = None
+
+        async def _capacity_grace() -> None:
+            """Wait for grace period, then kill the process."""
+            nonlocal fatal_error
+            await asyncio.sleep(self._capacity_timeout_seconds)
+            fatal_error = "capacity error not recovered within grace period"
+            logger.warning("gemini: capacity grace period expired, killing process")
+            with suppress(ProcessLookupError):
+                proc.kill()
 
         async def _drain_stdout() -> None:
             assert proc.stdout is not None
@@ -147,7 +165,7 @@ class GeminiTrigger(TriggerEngine):
                 stdout_chunks.append(chunk)
 
         async def _drain_stderr() -> None:
-            nonlocal fatal_error
+            nonlocal fatal_error, capacity_timer
             assert proc.stderr is not None
             async for line in proc.stderr:
                 stderr_chunks.append(line)
@@ -158,12 +176,20 @@ class GeminiTrigger(TriggerEngine):
                     with suppress(ProcessLookupError):
                         proc.kill()
                     return
+                if _CAPACITY_PATTERNS.search(text) and capacity_timer is None:
+                    logger.warning("gemini: capacity error detected, starting grace period (%ss): %s",
+                                   self._capacity_timeout_seconds, text.strip())
+                    capacity_timer = asyncio.create_task(_capacity_grace())
 
         stdout_task = asyncio.create_task(_drain_stdout())
         stderr_task = asyncio.create_task(_drain_stderr())
 
         await stderr_task
         if fatal_error:
+            if capacity_timer is not None:
+                capacity_timer.cancel()
+                with suppress(asyncio.CancelledError):
+                    await capacity_timer
             stdout_task.cancel()
             with suppress(asyncio.CancelledError):
                 await stdout_task
@@ -175,6 +201,10 @@ class GeminiTrigger(TriggerEngine):
             )
 
         await stdout_task
+        if capacity_timer is not None:
+            capacity_timer.cancel()
+            with suppress(asyncio.CancelledError):
+                await capacity_timer
         await proc.wait()
 
         output = b"".join(stdout_chunks).decode().strip()

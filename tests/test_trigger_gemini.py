@@ -186,15 +186,21 @@ class TestSendPrompt:
         proc.kill.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_fatal_resource_exhausted_kills_immediately(self):
-        """429 RESOURCE_EXHAUSTED triggers early fail."""
-        trigger = GeminiTrigger()
+    async def test_capacity_error_kills_after_grace_period(self):
+        """Capacity error starts grace timer; process killed when timer expires."""
+        trigger = GeminiTrigger(capacity_timeout_seconds=0.05)
 
-        proc = _make_proc(
-            stdout_lines=[],
-            stderr_lines=[b"RESOURCE_EXHAUSTED: No capacity available for model\n"],
-            returncode=1,
-        )
+        async def slow_stdout():
+            await asyncio.sleep(10)
+            yield b""
+
+        proc = AsyncMock()
+        proc.stdout = slow_stdout()
+        proc.stderr = _make_async_lines([b"RESOURCE_EXHAUSTED: No capacity available for model\n"])
+        proc.returncode = 1
+        proc.wait = AsyncMock(return_value=1)
+        proc.kill = Mock()
+        proc.communicate = AsyncMock(return_value=(b"", b""))
 
         async def fake_exec(*args, **kwargs):
             return proc
@@ -203,8 +209,28 @@ class TestSendPrompt:
             result = await trigger.send_prompt("sess1", "gemini1", "test")
 
         assert result.success is False
-        assert "RESOURCE_EXHAUSTED" in result.error
+        assert "capacity" in result.error.lower()
         proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_capacity_error_recovers_before_grace_period(self):
+        """CLI recovers from capacity error before grace period expires — success."""
+        trigger = GeminiTrigger(capacity_timeout_seconds=5.0)
+
+        proc = _make_proc(
+            stdout_lines=[b'{"text":"recovered ok"}\n'],
+            stderr_lines=[b"RESOURCE_EXHAUSTED: No capacity available\n", b"Retrying...\n"],
+            returncode=0,
+        )
+
+        async def fake_exec(*args, **kwargs):
+            return proc
+
+        with patch("ai_review.trigger.gemini.asyncio.create_subprocess_exec", side_effect=fake_exec):
+            result = await trigger.send_prompt("sess1", "gemini1", "test")
+
+        assert result.success is True
+        assert result.output == '{"text":"recovered ok"}'
 
 
 class TestClose:
