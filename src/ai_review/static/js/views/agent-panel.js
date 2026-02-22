@@ -10,7 +10,8 @@ import {
   _reviewerActionLabel,
   _shouldDeferIssueRender,
   _getLatestReviewerOpinion,
-  progressBadgeHtml
+  progressBadgeHtml,
+  voteTallyBadgeHtml
 } from '../utils.js';
 import { ensureIssueDisplayNumbers } from './issue-list.js';
 
@@ -223,6 +224,7 @@ export function renderAgentPanel() {
         <div class="reviewer-issue-main">
           <span class="reviewer-issue-title">${esc(rowTitle)}</span>
           ${progressBadgeHtml(issue.progress_status)}
+          ${voteTallyBadgeHtml(issue)}
         </div>
       </div>`;
     };

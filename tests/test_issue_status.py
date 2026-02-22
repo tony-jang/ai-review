@@ -232,3 +232,50 @@ class TestFullStatusLifecycle:
 
         manager.change_issue_status(sid, issue.id, "reported", author="coder")
         assert issue.progress_status == IssueProgressStatus.REPORTED
+
+
+class TestVerificationAutoCompleted:
+    """Verification 단계에서 리포터 no_fix 시 FIXED → COMPLETED 자동 전환."""
+
+    @pytest.mark.asyncio
+    async def test_reporter_no_fix_completes_fixed_issue(self, manager, session_with_issue):
+        sid, issue = session_with_issue
+        session = manager.get_session(sid)
+        # Set up: issue is FIXED, session is VERIFYING, raised_by is reviewer-a
+        issue.progress_status = IssueProgressStatus.FIXED
+        issue.turn = 1  # advance turn so raiser can submit again
+        session.status = SessionStatus.VERIFYING
+        raiser = issue.raised_by
+
+        result = manager.submit_opinion(sid, issue.id, raiser, "no_fix", "수정 확인됨")
+        assert result["status"] == "accepted"
+        assert issue.progress_status == IssueProgressStatus.COMPLETED
+        status_ops = [op for op in issue.thread if op.action == OpinionAction.STATUS_CHANGE and op.model_id == "system"]
+        assert len(status_ops) == 1
+        assert status_ops[0].reasoning == "수정 완료 확인됨"
+
+    @pytest.mark.asyncio
+    async def test_reporter_no_fix_skips_if_not_fixed(self, manager, session_with_issue):
+        sid, issue = session_with_issue
+        session = manager.get_session(sid)
+        session.status = SessionStatus.VERIFYING
+        issue.turn = 1
+        # progress_status is still REPORTED (not FIXED)
+        raiser = issue.raised_by
+
+        result = manager.submit_opinion(sid, issue.id, raiser, "no_fix", "not fixed yet")
+        assert result["status"] == "accepted"
+        assert issue.progress_status == IssueProgressStatus.REPORTED
+
+    @pytest.mark.asyncio
+    async def test_non_reporter_no_fix_skips(self, manager, session_with_issue):
+        sid, issue = session_with_issue
+        session = manager.get_session(sid)
+        issue.progress_status = IssueProgressStatus.FIXED
+        issue.turn = 1
+        session.status = SessionStatus.VERIFYING
+
+        result = manager.submit_opinion(sid, issue.id, "other-reviewer", "no_fix", "looks good")
+        assert result["status"] == "accepted"
+        # Should NOT auto-complete because submitter is not the reporter
+        assert issue.progress_status == IssueProgressStatus.FIXED

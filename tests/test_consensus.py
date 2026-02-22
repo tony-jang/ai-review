@@ -8,7 +8,7 @@ from ai_review.consensus import (
     determine_consensus_type,
     determine_final_severity,
 )
-from ai_review.models import Issue, Opinion, OpinionAction, Severity
+from ai_review.models import Issue, IssueProgressStatus, Opinion, OpinionAction, Severity
 
 
 def _make_opinion(
@@ -402,3 +402,47 @@ class TestFalsePositiveWithdrawConsensus:
         # Should remain closed, not recalculated
         assert issue.consensus_type == "closed"
         assert issue.final_severity == Severity.DISMISSED
+
+
+class TestDismissedAutoWontFix:
+    """Dismissed 합의 시 progress_status 자동 WONT_FIX 전환 테스트."""
+
+    def test_dismissed_sets_wont_fix(self):
+        """Dismissed consensus should auto-transition REPORTED → WONT_FIX."""
+        issue = _make_issue_with_thread([
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH),
+            _make_opinion("b", OpinionAction.NO_FIX),
+            _make_opinion("c", OpinionAction.NO_FIX),
+        ])
+        assert issue.progress_status == IssueProgressStatus.REPORTED
+        apply_consensus([issue], threshold=2)
+        assert issue.consensus_type == "dismissed"
+        assert issue.progress_status == IssueProgressStatus.WONT_FIX
+        # STATUS_CHANGE opinion should be appended
+        status_ops = [op for op in issue.thread if op.action == OpinionAction.STATUS_CHANGE]
+        assert len(status_ops) == 1
+        assert status_ops[0].model_id == "system"
+
+    def test_dismissed_skips_if_already_wont_fix(self):
+        """Should not add duplicate STATUS_CHANGE if already WONT_FIX."""
+        issue = _make_issue_with_thread([
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH),
+            _make_opinion("b", OpinionAction.NO_FIX),
+            _make_opinion("c", OpinionAction.NO_FIX),
+        ])
+        issue.progress_status = IssueProgressStatus.WONT_FIX
+        thread_len_before = len(issue.thread)
+        apply_consensus([issue], threshold=2)
+        assert issue.progress_status == IssueProgressStatus.WONT_FIX
+        # No new STATUS_CHANGE should be added
+        assert len(issue.thread) == thread_len_before
+
+    def test_fix_required_consensus_keeps_reported(self):
+        """fix_required consensus should not change progress_status."""
+        issue = _make_issue_with_thread([
+            _make_opinion("a", OpinionAction.RAISE, Severity.HIGH),
+            _make_opinion("b", OpinionAction.FIX_REQUIRED, Severity.HIGH),
+        ])
+        apply_consensus([issue], threshold=2)
+        assert issue.consensus_type == "fix_required"
+        assert issue.progress_status == IssueProgressStatus.REPORTED

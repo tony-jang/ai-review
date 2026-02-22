@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from ai_review.models import Issue, OpinionAction, Severity
+from ai_review.models import Issue, IssueProgressStatus, Opinion, OpinionAction, Severity
 
 # Actions that count toward the "no fix" direction in voting
 _NO_FIX_ACTIONS = frozenset({
@@ -152,6 +152,18 @@ def apply_consensus(
         if issue.consensus:
             issue.consensus_type = determine_consensus_type(issue)
             issue.final_severity = determine_final_severity(issue)
+            # Dismissed 합의 → WONT_FIX 자동 전환
+            if (
+                issue.consensus_type == "dismissed"
+                and issue.progress_status == IssueProgressStatus.REPORTED
+            ):
+                issue.progress_status = IssueProgressStatus.WONT_FIX
+                issue.thread.append(Opinion(
+                    model_id="system",
+                    action=OpinionAction.STATUS_CHANGE,
+                    reasoning="합의에 의해 수정 불필요로 결정됨",
+                    status_value=IssueProgressStatus.WONT_FIX.value,
+                ))
         else:
             issue.consensus_type = None
             issue.final_severity = None

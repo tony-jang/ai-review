@@ -158,6 +158,25 @@ export function progressBadgeHtml(status) {
   return `<span class="progress-badge" style="background:${color}20;color:${color}">${esc(label)}</span>`;
 }
 
+export function voteTallyBadgeHtml(issue) {
+  if (!issue) return '';
+  const thread = Array.isArray(issue.thread) ? issue.thread : [];
+  const seen = new Set();
+  let fix = 0, comment = 0, nofix = 0;
+  for (const op of thread) {
+    if (!op) continue;
+    const action = _normalizeReviewerAction(op.action || '');
+    if (action === 'status_change') continue;
+    if (seen.has(op.model_id)) continue;
+    seen.add(op.model_id);
+    if (action === 'raise' || action === 'fix_required') fix++;
+    else if (action === 'comment') comment++;
+    else if (action === 'no_fix' || action === 'false_positive' || action === 'withdraw') nofix++;
+  }
+  if (fix === 0 && comment === 0 && nofix === 0) return '';
+  return `<div class="vote-tally-badge">수정 필요: <span class="vote-fix">${fix}</span> / 의견: <span class="vote-comment">${comment}</span> / 수정 불필요: <span class="vote-nofix">${nofix}</span></div>`;
+}
+
 export function _getInitialRaiseOpinion(issue) {
   const raisedBy = String(issue?.raised_by || '').trim();
   if (!raisedBy) return null;

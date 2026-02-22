@@ -1131,6 +1131,22 @@ class SessionManager:
                     issue.final_severity = Severity.DISMISSED
                     issue.progress_status = IssueProgressStatus.WONT_FIX
 
+                # Verification: 리포터가 no_fix → 수정 확인 완료
+                if (
+                    session.status == SessionStatus.VERIFYING
+                    and parsed_action == OpinionAction.NO_FIX
+                    and model_id == issue.raised_by
+                    and issue.progress_status == IssueProgressStatus.FIXED
+                ):
+                    issue.progress_status = IssueProgressStatus.COMPLETED
+                    issue.thread.append(Opinion(
+                        model_id="system",
+                        action=OpinionAction.STATUS_CHANGE,
+                        reasoning="수정 완료 확인됨",
+                        status_value=IssueProgressStatus.COMPLETED.value,
+                        turn=target_turn,
+                    ))
+
                 self.broker.publish(
                     "opinion_submitted",
                     {
@@ -1636,6 +1652,8 @@ class SessionManager:
 
         return "\n".join(lines)
 
+    _DISMISSABLE_CONSENSUS = {"fix_required", "dismissed"}
+
     def dismiss_issue(
         self,
         session_id: str,
@@ -1643,21 +1661,23 @@ class SessionManager:
         reasoning: str = "",
         dismissed_by: str = "",
     ) -> dict:
-        """Dismiss a fix_required issue."""
+        """Dismiss a fix_required or dismissed issue."""
         session = self.get_session(session_id)
         if session.status == SessionStatus.COMPLETE:
             raise ValueError("Cannot dismiss in complete state")
         issue = next((i for i in session.issues if i.id == issue_id), None)
         if issue is None:
             raise KeyError(f"Issue not found: {issue_id}")
-        if issue.consensus_type != "fix_required":
-            raise ValueError("Can only dismiss fix_required issues")
+        if issue.consensus_type not in self._DISMISSABLE_CONSENSUS:
+            raise ValueError("Can only dismiss fix_required or dismissed issues")
         if any(d.issue_id == issue_id for d in session.dismissals):
             raise ValueError(f"Already dismissed: {issue_id}")
         dismissal = IssueDismissal(
             issue_id=issue_id, reasoning=reasoning, dismissed_by=dismissed_by,
         )
         session.dismissals.append(dismissal)
+        if issue.progress_status == IssueProgressStatus.REPORTED:
+            issue.progress_status = IssueProgressStatus.WONT_FIX
         self.broker.publish("issue_dismissed", {
             "session_id": session_id, "issue_id": issue_id,
         })

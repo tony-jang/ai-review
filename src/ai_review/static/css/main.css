@@ -1138,6 +1138,10 @@ td.diff-issue-marker.diff-line-num { color: var(--text); opacity: 0.7; }
 .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
 /* Progress status badge */
 .progress-badge { font-size:10px; padding:2px 6px; border-radius:4px; font-weight:600; white-space:nowrap; flex-shrink:0; }
+.vote-tally-badge { font-size:10px; padding:2px 0; color:var(--text-muted); white-space:nowrap; grid-column:1/-1; }
+.vote-tally-badge .vote-fix { color:#22C55E; font-weight:700; }
+.vote-tally-badge .vote-comment { color:#EAB308; font-weight:700; }
+.vote-tally-badge .vote-nofix { color:#EF4444; font-weight:700; }
 /* Status change log line in thread */
 .status-change-log { display:flex; align-items:center; gap:6px; padding:6px 0; font-size:12px; color:var(--text-muted); border-bottom:1px dashed var(--border); }
 .status-change-log .status-change-arrow { font-weight:700; color:var(--accent); }

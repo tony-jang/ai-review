@@ -1790,11 +1790,14 @@ class TestDismissIssue:
         return session, issue
 
     def test_dismiss_success(self, manager):
+        from ai_review.models import IssueProgressStatus
+
         session, issue = self._setup_fixing_session(manager)
         result = manager.dismiss_issue(session.id, issue.id, "Not critical", "tony")
         assert result["status"] == "dismissed"
         assert len(session.dismissals) == 1
         assert session.dismissals[0].issue_id == issue.id
+        assert issue.progress_status == IssueProgressStatus.WONT_FIX
 
     def test_dismiss_wrong_state(self, manager):
         from ai_review.models import Issue, ReviewSession, Severity
@@ -1823,11 +1826,24 @@ class TestDismissIssue:
         session, _ = self._setup_fixing_session(manager)
         nit = Issue(
             title="Nit", severity=Severity.LOW, file="y.py",
-            description="d", consensus=True, consensus_type="dismissed",
+            description="d", consensus=True, consensus_type="undecided",
         )
         session.issues.append(nit)
-        with pytest.raises(ValueError, match="Can only dismiss fix_required"):
+        with pytest.raises(ValueError, match="Can only dismiss fix_required or dismissed"):
             manager.dismiss_issue(session.id, nit.id)
+
+    def test_dismiss_dismissed_consensus(self, manager):
+        from ai_review.models import Issue, IssueProgressStatus, Severity
+
+        session, _ = self._setup_fixing_session(manager)
+        dismissed_issue = Issue(
+            title="Nit", severity=Severity.LOW, file="y.py",
+            description="d", consensus=True, consensus_type="dismissed",
+        )
+        session.issues.append(dismissed_issue)
+        result = manager.dismiss_issue(session.id, dismissed_issue.id, "중복", "tony")
+        assert result["status"] == "dismissed"
+        assert dismissed_issue.progress_status == IssueProgressStatus.WONT_FIX
 
     def test_dismiss_duplicate(self, manager):
         session, issue = self._setup_fixing_session(manager)
